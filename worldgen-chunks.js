@@ -139,7 +139,7 @@ const _top = new THREE.Color(), _hor = new THREE.Color(), _sunC = new THREE.Colo
 const sunDir = new THREE.Vector3();
 let dayF = 1, nightF = 0, sunElev = 1;
 
-function updateSky(t) {
+function updateSky(t, dt) {
   const ang = (t - 0.25) * Math.PI * 2;
   sunElev = Math.sin(ang);
   sunDir.set(Math.cos(ang), Math.sin(ang), 0.32).normalize();
@@ -202,6 +202,15 @@ function updateSky(t) {
   // fades them all together (invisible at night and afternoon).
   const dew = smooth(0.19, 0.30, t) * (1 - smooth(0.42, 0.54, t));
   matPuddle.opacity = 0.62 * dew;
+
+  // Living water (Feature A): drift the two ripple layers in opposite directions so the
+  // canals read as slow flow, the counter-motion beating into a faint shimmer. And drive
+  // matWater's emissive sparkle by day — a sky-blue glint at noon that dies at night, on
+  // top of the material's blue body so daylight water stays clearly blue.
+  const wdt = dt || 0;
+  texWater.offset.x += wdt * 0.008; texWater.offset.y += wdt * 0.003;
+  texWater2.offset.x -= wdt * 0.005; texWater2.offset.y -= wdt * 0.003;
+  matWater.emissiveIntensity = dayF * 0.10;
 }
 
 /* ======================================================================== */

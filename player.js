@@ -11,7 +11,8 @@ const player = {
   grounded: false, climbing: false, onCanopy: false, supportLayer: null,
   heat: 0, exposed: false, inPit: false, inWater: false,
   bob: 0, stride: 0,
-  airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0
+  airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0,
+  sunE: 0                                                  // smoothed sun-exposure factor (0=full shade, 1=raw sun)
 };
 let lastShade = player.pos.clone();
 // Permanent sprint boost, awarded after golding all five Trials (persisted).
@@ -222,9 +223,15 @@ function stepPlayer(dt) {
    catch you. Hard ground / roofs / the viaduct deck / streets hurt: a 7–10 m drop
    staggers; over 10 m blacks you out — you wake in the last shade, hotter, and any
    Trial or errand in progress is lost. Normal jumps (a 3 m wall ≈ 4 m drop) are free. */
-const SAFE_LEAF = { weave: 1, nest: 1, bough: 1 };   // + tree-canopy pads (onCanopy, no layer tag)
+const SAFE_LEAF = { weave: 1, nest: 1, bough: 1, net: 1 };   // + tree-canopy pads (onCanopy, no layer tag)
 function handleLanding(drop) {
   const p = player;
+  // Sky nets (Feature B): a walkable net catches you from any height and springs you back —
+  // a small bounce on anything but a gentle step-down.
+  if (p.onCanopy && p.supportLayer === 'net') {
+    if (drop > 3) { p.vel.y = 2.5; p.grounded = false; p.airPeakY = p.pos.y; msg('The net flexes and throws you back up.', 3); }
+    return;
+  }
   if (drop < 7) return;                                          // ordinary hop — nothing happens
   const soft = p.inWater || (p.onCanopy && (p.supportLayer === null || SAFE_LEAF[p.supportLayer]));
   if (soft) {
@@ -259,25 +266,81 @@ function blackout(line) {
 /* ======================================================================== */
 /*  HEAT                                                                    */
 /* ======================================================================== */
-function isExposed() {
-  if (player.pos.y > CANOPY_Y) return true;
-  const c = chunkAt(player.pos.x, player.pos.z);
-  if (c && c.openRect) {
-    const o = c.openRect;
-    if (player.pos.x > o.x0 && player.pos.x < o.x1 && player.pos.z > o.z0 && player.pos.z < o.z1) return true;
-  }
-  return false;
+/* --- analytic sun-occlusion probe --------------------------------------------
+   Marches an implicit ray from the player toward the sun (sunDir, set in updateSky)
+   against the runtime collision arrays — no THREE.Raycaster. Any solid AABB across
+   the path = full shade. Leaf discs (pads) and trunks each attenuate partially, so
+   direct sun reaches the body through shafts between trees at street level, while
+   real overhead cover shades you even above CANOPY_Y. Returns exposure E in [0,1]:
+   0 = full shade, 1 = raw sun. No allocations — all scalar math. */
+function _rayHitsBox(px, py, pz, dx, dy, dz, x0, z0, x1, z1, h) {
+  let tmin = 0, tmax = 1e9;
+  if (Math.abs(dx) < 1e-9) { if (px < x0 || px > x1) return false; }
+  else { let t1 = (x0 - px) / dx, t2 = (x1 - px) / dx; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (Math.abs(dy) < 1e-9) { if (py < 0 || py > h) return false; }
+  else { let t1 = (0 - py) / dy, t2 = (h - py) / dy; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (Math.abs(dz) < 1e-9) { if (pz < z0 || pz > z1) return false; }
+  else { let t1 = (z0 - pz) / dz, t2 = (z1 - pz) / dz; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  return tmax >= tmin && tmax > 0;
 }
-let shadeTimer = 0;
+function sunOcclusion(px, py, pz, sd) {
+  if (sd.y <= 0.05) return 0;                                // sun at/below horizon → no direct path (dawn/dusk/night)
+  const dx = sd.x, dy = sd.y, dz = sd.z;
+  let T = 1;                                                 // transmittance = product of (1 - opacity)
+  const solids = nearby.solids;
+  for (let i = 0; i < solids.length; i++) {                  // walls / roofs / decks: opaque → full shade
+    const s = solids[i];
+    if (_rayHitsBox(px, py, pz, dx, dy, dz, s.x0, s.z0, s.x1, s.z1, s.h)) return 0;
+  }
+  const pads = nearby.pads;                                  // leaf discs: canopies, weave, limbs, nets
+  for (let i = 0; i < pads.length; i++) {
+    const pd = pads[i];
+    if (pd.y <= py + 0.5) continue;                          // pad must be genuine overhead cover, not the platter you stand on
+    const t = (pd.y - py) / dy;
+    const hx = px + dx * t, hz = pz + dz * t;
+    const ex = hx - pd.x, ez = hz - pd.z, rr = pd.r * 0.92;
+    if (ex * ex + ez * ez > rr * rr) continue;
+    T *= 1 - (pd.layer === 'net' ? 0.35 : 0.75);             // leaves aren't opaque; nets barely shade
+  }
+  const trunks = nearby.trunks;                              // vertical cylinders: cheap 2D closest-approach
+  const denom = dx * dx + dz * dz;
+  if (denom > 1e-9) {
+    for (let i = 0; i < trunks.length; i++) {
+      const tr = trunks[i];
+      const tc = ((tr.x - px) * dx + (tr.z - pz) * dz) / denom;
+      if (tc <= 0) continue;
+      const yh = py + dy * tc; if (yh < 0 || yh > tr.h) continue;
+      const ddx = px + dx * tc - tr.x, ddz = pz + dz * tc - tr.z;
+      if (ddx * ddx + ddz * ddz > tr.r * tr.r) continue;
+      T *= 1 - 0.9;
+    }
+  }
+  // Beyond-range fallback: if the ray leaves the 3×3 chunk ring horizontally while still
+  // below leaf height (~45 m), the endless forest statistically covers the horizon-ward
+  // path — add canopy-average cover so low sun angles don't falsely burn sheltered streets.
+  if (py < CANOPY_Y) {
+    const horizRun = ((45 - py) / dy) * Math.hypot(dx, dz);
+    if (horizRun > CHUNK) T *= 1 - 0.5;
+  }
+  return T < 0 ? 0 : T;
+}
+
+let shadeTimer = 0, sunTimer = 0.20, sunTarget = 0;         // throttle the probe to ~5 Hz, lerp toward it
 function stepHeat(dt) {
   const p = player;
-  p.exposed = isExposed();
+  sunTimer += dt;
+  if (sunTimer >= 0.20) { sunTarget = sunOcclusion(p.pos.x, p.pos.y, p.pos.z, sunDir); sunTimer = 0; }
+  p.sunE = lerp(p.sunE, sunTarget, clamp(dt * 4, 0, 1));     // smooth transitions when walking through shafts
+  let E = p.sunE;
   const deepPit = p.inPit && p.pos.y < -1;                   // down in the sinkhole bowl = deep shade
-  if (deepPit) p.exposed = false;
+  if (deepPit) E = 0;
+  p.exposed = E > 0.55;                                      // drives messages / missions / HUD "IN THE SUN"
+
   const airBase = lerp(27, 46, dayF);
   let air = airBase + (p.exposed ? 11 : 0) - clamp((p.pos.y - 40) * 0.04, 0, 3);
   if (deepPit) air -= 6;                                     // cooler at the bottom
-  if (p.exposed && dayF > 0.05) p.heat += dayF * dt * 2.6;   // ~40 s to overheat at high noon
+  const heatRate = dayF * 2.6 * smooth(0.25, 0.9, E);        // E<0.25 shaded, dappled = slow burn, full shaft = full burn
+  if (dayF > 0.05 && heatRate > 0) p.heat += dt * heatRate;  // ~40 s to overheat in a full noon shaft
   else {
     let drain = 7;                                           // base shade drain
     if (deepPit) drain = 14;                                 // ~2× in the pit
@@ -287,7 +350,7 @@ function stepHeat(dt) {
   p.heat = clamp(p.heat, 0, 100);
 
   shadeTimer += dt;
-  if (!p.exposed && p.grounded && p.pos.y < CANOPY_Y && shadeTimer > 1) { lastShade.copy(p.pos); shadeTimer = 0; }
+  if (E < 0.25 && p.grounded && p.pos.y < CANOPY_Y && shadeTimer > 1) { lastShade.copy(p.pos); shadeTimer = 0; }
 
   if (p.heat >= 100) {
     // heatstroke: stagger back to the last shade

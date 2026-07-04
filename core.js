@@ -39,7 +39,12 @@ const CANOPY_Y = 24;         // above this you are in the sun
 const DAY_LEN = 600;         // seconds per full day
 const GRAV = 16, JUMP = 6.2, WALK = 5.2, SPRINT = 1.75, EYE = 1.62, PR = 0.42;
 const CLIMB_SPEED = 3.2;
-const SPIRE = { cx: 2, cz: 1, x: 2 * CHUNK + 32, z: 1 * CHUNK + 32, size: 22, h: 78 };
+function randomizeSPIRE() {
+  const cx = Math.floor(Math.random() * 16);
+  const cz = Math.floor(Math.random() * 16);
+  return { cx, cz, x: cx * CHUNK + 32, z: cz * CHUNK + 32, size: 22, h: 78 };
+}
+const SPIRE = randomizeSPIRE();
 
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot');   // screenshot/smoke-test mode
@@ -531,8 +536,8 @@ const leafDepth = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPac
 // Still, dark reservoir water — one extra plane mesh per reservoir chunk (Anomalies).
 // Water: blue with a procedural ripple texture. UVs on each water plane are scaled
 // so one texture tile ≈ 4 m regardless of the plane's size (see scaleWaterUVs).
-function makeWaterTexture() {
-  const S = 256, r = mulberry32(4242);
+function makeWaterTexture(seed) {
+  const S = 256, r = mulberry32(seed || 4242);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   const g = x.createLinearGradient(0, 0, S, S);
   g.addColorStop(0, '#2b6f8e'); g.addColorStop(0.5, '#1f5a78'); g.addColorStop(1, '#2b6f8e');
@@ -561,14 +566,72 @@ function makeWaterTexture() {
   }
   return canvasTex(c);
 }
-const texWater = makeWaterTexture();
-const matWater = new THREE.MeshStandardMaterial({ map: texWater, color: srgb(0x9fc8d8), transparent: true, opacity: 0.82, roughness: 0.16, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false });
-// Scale a water plane's UVs so the ripple texture tiles at ~4 m (RepeatWrapping).
-function scaleWaterUVs(geo, worldW, worldH) {
+// Living water (Feature A): two counter-drifting ripple layers give the canals an
+// interference shimmer that reads as slow flow. Layer 1 (texWater) is the opaque-ish
+// blue body carried by matWater; layer 2 (texWater2) is a fainter transparent sheet
+// 0.02 m above it, tiled a little coarser so the two grids beat against each other.
+// updateSky (worldgen-chunks.js) drifts both offsets and drives matWater's noon
+// emissive sparkle; the texture consts below are read from there.
+const texWater = makeWaterTexture(4242);
+const texWater2 = makeWaterTexture(1379);
+const matWater = new THREE.MeshStandardMaterial({
+  map: texWater, color: srgb(0x9fc8d8), transparent: true, opacity: 0.82,
+  roughness: 0.12, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  emissive: srgb(0xbfe0f2), emissiveIntensity: 0                              // sky-blue noon sparkle, driven per frame
+});
+const matWater2 = new THREE.MeshStandardMaterial({
+  map: texWater2, color: srgb(0xa8cfe0), transparent: true, opacity: 0.35,
+  roughness: 0.14, metalness: 0.1, side: THREE.DoubleSide, depthWrite: false,
+  blending: THREE.NormalBlending
+});
+// Scale a water plane's UVs so the ripple texture tiles at ~`tile` m (default 4, RepeatWrapping).
+function scaleWaterUVs(geo, worldW, worldH, tile) {
+  tile = tile || 4;
   const uv = geo.attributes.uv;
-  for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) * worldW / 4, uv.getY(k) * worldH / 4);
+  for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) * worldW / tile, uv.getY(k) * worldH / tile);
   uv.needsUpdate = true;
 }
+
+// Sky nets (Feature B): a woven rope grid on a transparent ground — the aerial jungle
+// strung between crowns. Dark hemp-brown double strands running both diagonals at ~14 px
+// spacing, lighter highlight along each rope, a few snapped strands and caught leaves.
+// alphaTest so the holes read as open sky; DoubleSide, rough, no shine.
+function makeNetTexture() {
+  const S = 256, sp = 14, r = mulberry32(6161);
+  const c = makeCanvas(S, S), x = c.getContext('2d');
+  x.clearRect(0, 0, S, S);
+  // draw one rope as a dark strand with a thin lighter highlight offset along it
+  function rope(x0, y0, x1, y1, broken) {
+    const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1, nx = -dy / L, ny = dx / L;
+    const cut = broken ? 0.3 + r() * 0.4 : 1;              // snapped strands stop partway
+    const ex = x0 + dx * cut, ey = y0 + dy * cut;
+    x.strokeStyle = `rgba(${44 + r() * 16 | 0},${32 + r() * 14 | 0},${20 + r() * 10 | 0},0.95)`;
+    x.lineWidth = 3.2; x.beginPath(); x.moveTo(x0, y0); x.lineTo(ex, ey); x.stroke();
+    x.strokeStyle = `rgba(${120 + r() * 30 | 0},${96 + r() * 24 | 0},${64 + r() * 18 | 0},0.7)`;
+    x.lineWidth = 1.1; x.beginPath(); x.moveTo(x0 + nx, y0 + ny); x.lineTo(ex + nx, ey + ny); x.stroke();
+  }
+  // two diagonal families across a wrapped field (so tiling stays seamless)
+  for (let d = -S; d < S * 2; d += sp) {
+    rope(d, 0, d + S, S, r() < 0.06);          // ╲ strands
+    rope(d + S, 0, d, S, r() < 0.06);          // ╱ strands
+  }
+  // a handful of caught leaves snagged in the mesh
+  for (let i = 0; i < 22; i++) {
+    const lx = r() * S, ly = r() * S, rw = 5 + r() * 7, rh = 3 + r() * 4;
+    const hpx = 80 + (r() - 0.5) * 40, sat = 34 + r() * 24, lig = 26 + r() * 20;
+    x.save(); x.translate(lx, ly); x.rotate(r() * 7);
+    x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
+    x.beginPath(); x.ellipse(0, 0, rw, rh, 0, 0, 7); x.fill();
+    x.strokeStyle = `hsl(${hpx},${sat}%,${Math.max(10, lig - 14)}%)`; x.lineWidth = 1;
+    x.beginPath(); x.moveTo(-rw * 0.8, 0); x.lineTo(rw * 0.8, 0); x.stroke();
+    x.restore();
+  }
+  return canvasTex(c);
+}
+const texNet = makeNetTexture();
+const matNet = new THREE.MeshStandardMaterial({
+  map: texNet, vertexColors: true, alphaTest: 0.35, side: THREE.DoubleSide, roughness: 1, metalness: 0
+});
 
 /* ------------------------------------------------------- geometry batching -- */
 class Batch {

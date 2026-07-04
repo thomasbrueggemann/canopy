@@ -137,6 +137,12 @@ function addReservoir(B, colData, mini, rng, ox, oz, extra) {
   const wm = new THREE.Mesh(resWGeo, matWater);
   wm.rotation.x = -Math.PI / 2; wm.position.set(cx, waterY, cz); wm.matrixAutoUpdate = false; wm.updateMatrix();
   extra.push(wm);
+  // Living water (Feature A): a fainter second ripple sheet 0.02 m above, tiled coarser.
+  const resWGeo2 = new THREE.PlaneGeometry(2 * half - wt, 2 * half - wt);
+  scaleWaterUVs(resWGeo2, 2 * half - wt, 2 * half - wt, 6.5);
+  const wm2 = new THREE.Mesh(resWGeo2, matWater2);
+  wm2.rotation.x = -Math.PI / 2; wm2.position.set(cx, waterY + 0.02, cz); wm2.matrixAutoUpdate = false; wm2.updateMatrix();
+  extra.push(wm2);
   colData.waters.push({ x0: x0 + wt, z0: z0 + wt, x1: x1 - wt, z1: z1 - wt, y: waterY });   // interior only (not the parapet)
   for (let k = 0; k < 3; k++) {                                           // ladders/vines up the outside
     const a = k / 3 * Math.PI * 2 + rng();
@@ -291,6 +297,7 @@ function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
     for (let du = 0; du <= spanLen; du += 1.3) {          // dense walkable deck pads (raised deck → pads, not a ground-up solid)
       for (let dw = -1; dw <= 1; dw++) { const [px, pz] = uvToXZ(axis, cross + dw * 2, u0 + du); colData.pads.push({ x: px, z: pz, r: 1.4, y, layer: 'viaduct' }); }
     }
+    colData.dripAnchors.push({ x: mx, y: y - 0.6, z: mz });   // Life pass: dew drips off the viaduct underside
     for (const edge of [-hw, hw]) {                       // guard rails
       const [rx, rz] = uvToXZ(axis, cross + edge, (u0 + u1) / 2);
       if (axis === 0) B.plain.addGeo(tplBox, compose(rx, y, rz, 0.15, 0.7, spanLen), rail, 0.05, rng);
@@ -426,6 +433,10 @@ function buildCanalAxis(B, colData, rng, ix, iz, ox, oz, axis, extra) {
   const moss = _c.copy(COL.moss).multiplyScalar(0.9).clone();
   const bankCol = _c.copy(COL.moss).lerp(COL.rock, 0.4).multiplyScalar(0.7).clone();
   const cop = _c.copy(COL.rock).multiplyScalar(1.1).clone();
+  // Living water (Feature A): pale desaturated foam/scum line clinging to each bank at the
+  // waterline. Batched into B.plain (no new material); the darker water-side edge (foamDk)
+  // fakes low opacity so it reads as a thin scum band, not a painted stripe.
+  const foam = srgb(0xb6c2bb), foamDk = _c.copy(srgb(0xb6c2bb)).multiplyScalar(0.5).clone();
 
   // 1. silt bed
   B.plain.quad([cx0, bedY, cz1], [cx1, bedY, cz1], [cx1, bedY, cz0], [cx0, bedY, cz0], [0, 0, 1, CHUNK / 4], silt);
@@ -441,6 +452,9 @@ function buildCanalAxis(B, colData, rng, ix, iz, ox, oz, axis, extra) {
       // inner moss band at the waterline
       const mx = wallCross;
       B.plain.quad([mx, waterY + 0.35, cz1], [mx, waterY + 0.35, cz0], [mx, waterY - 0.35, cz0], [mx, waterY - 0.35, cz1], [0, 0, 1, CHUNK / 3], moss);
+      // foam/scum line 0.25 m wide along this bank at water level
+      const ffx0 = Math.min(wallCross, wallCross - s * 0.25), ffx1 = Math.max(wallCross, wallCross - s * 0.25);
+      B.plain.quad([ffx0, waterY + 0.012, cz1], [ffx1, waterY + 0.012, cz1], [ffx1, waterY + 0.012, cz0], [ffx0, waterY + 0.012, cz0], [0, 0, 1, 1], foam, foamDk);
       // tow-path bank from coping out to the sidewalk
       const bx0 = Math.min(wallCross, wallCross + s * (bank - H)), bx1 = Math.max(wallCross, wallCross + s * (bank - H));
       B.plain.quad([bx0, 0.03, cz1], [bx1, 0.03, cz1], [bx1, 0.03, cz0], [bx0, 0.03, cz0], [0, 0, 1, 1], bankCol);
@@ -449,6 +463,9 @@ function buildCanalAxis(B, colData, rng, ix, iz, ox, oz, axis, extra) {
       B.plain.addGeo(tplBox, compose(base0 + CHUNK / 2, 0.05, wc, CHUNK, 0.14, 0.7), cop, 0.05, crng);
       const mz = wallCross;
       B.plain.quad([cx0, waterY + 0.35, mz], [cx1, waterY + 0.35, mz], [cx1, waterY - 0.35, mz], [cx0, waterY - 0.35, mz], [0, 0, 1, CHUNK / 3], moss);
+      // foam/scum line 0.25 m wide along this bank at water level
+      const ffz0 = Math.min(wallCross, wallCross - s * 0.25), ffz1 = Math.max(wallCross, wallCross - s * 0.25);
+      B.plain.quad([cx1, waterY + 0.012, ffz0], [cx1, waterY + 0.012, ffz1], [cx0, waterY + 0.012, ffz1], [cx0, waterY + 0.012, ffz0], [0, 0, 1, 1], foam, foamDk);
       const bz0 = Math.min(wallCross, wallCross + s * (bank - H)), bz1 = Math.max(wallCross, wallCross + s * (bank - H));
       B.plain.quad([cx1, 0.03, bz0], [cx1, 0.03, bz1], [cx0, 0.03, bz1], [cx0, 0.03, bz0], [0, 0, 1, 1], bankCol);
     }
@@ -462,6 +479,14 @@ function buildCanalAxis(B, colData, rng, ix, iz, ox, oz, axis, extra) {
   wm.position.set(axis === 0 ? cross : base0 + CHUNK / 2, waterY, axis === 0 ? base0 + CHUNK / 2 : cross);
   wm.matrixAutoUpdate = false; wm.updateMatrix();
   extra.push(wm);
+  // Living water (Feature A): fainter second ripple sheet 0.02 m above, tiled coarser.
+  const wgeo2 = axis === 0 ? new THREE.PlaneGeometry(2 * H, CHUNK) : new THREE.PlaneGeometry(CHUNK, 2 * H);
+  scaleWaterUVs(wgeo2, axis === 0 ? 2 * H : CHUNK, axis === 0 ? CHUNK : 2 * H, 6.5);
+  const wm2 = new THREE.Mesh(wgeo2, matWater2);
+  wm2.rotation.x = -Math.PI / 2;
+  wm2.position.set(axis === 0 ? cross : base0 + CHUNK / 2, waterY + 0.02, axis === 0 ? base0 + CHUNK / 2 : cross);
+  wm2.matrixAutoUpdate = false; wm2.updateMatrix();
+  extra.push(wm2);
 
   // 4. collision: wading water rect + a rect pit so the bed is the ground inside the channel
   colData.waters.push({ x0: cx0, z0: cz0, x1: cx1, z1: cz1, y: waterY });
@@ -602,6 +627,7 @@ function addShrine(B, colData, rng, s) {
     const dx = (rng() - 0.5) * 0.6, dz = (rng() - 0.5) * 0.4;
     B.plain.addGeo(tplCyl, compose(sx + dx, sy + 0.25, sz + dz, 0.05, 0.16 + rng() * 0.12, 0.05), srgb(0xd8cdb0), 0.06, rng);  // candle stub
     B.lamp.addGeo(tplBlob, compose(sx + dx, sy + 0.45, sz + dz, 0.05, 0.08, 0.05), srgb(0xffdf9c), 0, rng);                   // flame dot (night emissive)
+    if (k === 0) colData.swingAnchors.push({ x: sx + dx, y: sy + 0.45, z: sz + dz });   // Life pass: candle-flame flicker/sway at night
   }
   // dried-flower tufts (warm-tinted grass) at the shelf base
   for (let k = 0; k < 3; k++) {
@@ -672,7 +698,11 @@ function addHamletBridge(B, colData, rng, ax, ay, az, bx, by, bz) {
   for (let k = 1; k < segs; k += 3) {
     const a = pts[k];
     B.lamp.addGeo(tplBlob, compose(a[0] + px * half, a[1] + 0.75, a[2] + pz * half, 0.16, 0.2, 0.16), srgb(0xffcf87), 0, rng);
+    // Life pass: this bridge lantern softly swings at night (pooled additive glow overlay).
+    colData.swingAnchors.push({ x: a[0] + px * half, y: a[1] + 0.75, z: a[2] + pz * half });
   }
+  // Life pass: a slow drip off the sagging deck underside after dew hours.
+  { const m = pts[(segs / 2) | 0]; colData.dripAnchors.push({ x: m[0], y: m[1] - 0.3, z: m[2] }); }
   // a hanging cloth banner mid-span
   if (rng() < 0.7) {
     const m = pts[(segs / 2) | 0], cl = [srgb(0xb5552f), srgb(0x9a7a2f), srgb(0x4e6242)][(rng() * 3) | 0];
@@ -772,6 +802,7 @@ function addHamlet(B, colData, mini, rng, ix, iz, ox, oz) {
     B.plain.addGeo(tplRock, compose(cx + Math.cos(a) * 1.5, rr * 0.3, cz + Math.sin(a) * 1.5, rr, rr * 0.6, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
   }
   B.lamp.addGeo(tplBlob, compose(cx, 0.35, cz, 0.7, 0.4, 0.7), srgb(0xff7b3a), 0, rng);   // embers (glow at night)
+  colData.smokes.push({ x: cx, y: 0.9, z: cz, r: 0.6, warm: true });   // Life pass: fire-pit smoke plume
   for (let j = 0; j < 3; j++) addGlowPlant(B, rng, cx + (rng() - 0.5) * 4, cz + (rng() - 0.5) * 4, 0.3);
   // drying racks: two upright poles + a cross-bar with hanging cloth
   for (let r = 0; r < 2; r++) {
@@ -931,8 +962,11 @@ function buildChunk(ix, iz) {
   const style = districtStyle(ix, iz);        // Districts (Phase A): architectural identity
   CUR_STYLE = style;                          // addBuilding reads this unless opts.style given
   const ox = ix * CHUNK, oz = iz * CHUNK;
-  const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch() };
-  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [] };
+  const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
+  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [],
+    // Ambient-vignette anchors (Life pass): discovered at build time, driven at runtime by
+    // pooled overlays in entities.js. All optional, all cheap; queried O(near) per frame.
+    smokes: [], stallAnchors: [], bannerAnchors: [], swingAnchors: [], dripAnchors: [] };
   const mini = { rects: [], trees: [], type };
   const extraMeshes = [];   // non-batched meshes (e.g. reservoir water plane)
   let openRect = null; // area open to the sky at ground level
@@ -1203,7 +1237,8 @@ function buildChunk(ix, iz) {
     B.glow.mesh(matGlow, false, true),
     B.lamp.mesh(matLamp, false, true),
     B.puddle.mesh(matPuddle, false, true),
-    B.web.mesh(matWeb, false, false)
+    B.web.mesh(matWeb, false, false),
+    B.net.mesh(matNet, false, true)               // sky nets (Feature B)
   ];
   for (const m of meshes) if (m) group.add(m);
   for (const m of extraMeshes) group.add(m);

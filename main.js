@@ -1040,7 +1040,13 @@ if (SHOT) {
     player.yaw = Math.atan2(HAMLET.x - player.pos.x, HAMLET.z - player.pos.z) + 0.5;
     player.pitch = 0.0; dayT = 0.5;
   }
-  else { dayT = 0.42; player.pos.set(0, 0, 30); player.yaw = Math.PI; player.pitch = 0.04; }
+  else {
+    dayT = 0.42;
+    const spawnAngle = Math.random() * Math.PI * 2;
+    const spawnDist = 20 + Math.random() * 80;
+    player.pos.set(Math.cos(spawnAngle) * spawnDist, 0, 30 + Math.sin(spawnAngle) * spawnDist);
+    player.yaw = Math.PI; player.pitch = 0.04;
+  }
   ensureChunks(player.pos.x, player.pos.z, true);
   if (SHOT === '4') syncHamletResidents(0.016);   // residents in frame for the hamlet shot
   if (SHOT !== '2' && SHOT !== '4') { // a few citizens in frame
@@ -1077,7 +1083,7 @@ function loop() {
   const sx = Math.round(player.pos.x / 4) * 4, sz = Math.round(player.pos.z / 4) * 4;
   sun.target.position.set(sx, 0, sz);
   sun.target.updateMatrixWorld();
-  updateSky(dayT);
+  updateSky(dayT, dt);
   updateLampLights();
 
   // flashlight ramps smoothly toward on/off when toggled
@@ -1178,8 +1184,14 @@ function loop() {
     districtEl.textContent = (c && c.ix === HAMLET.cx && c.iz === HAMLET.cz && hamletFound) ? 'The Hidden Hamlet' : (c ? c.name : '—');
     airEl.textContent = Math.round(air);
     altEl.textContent = Math.round(player.pos.y);
-    coverEl.textContent = player.inWater ? 'in water' : player.exposed ? 'IN THE SUN' : (player.inPit && player.pos.y < -1) ? 'deep shade' : 'shaded';
-    coverEl.className = player.exposed ? 'exposed' : '';
+    const coverE = player.sunE;
+    coverEl.textContent = player.inWater ? 'in water'
+      : (player.inPit && player.pos.y < -1) ? 'deep shade'
+      : player.exposed ? 'IN THE SUN'
+      : coverE < 0.25 ? 'shaded'
+      : 'dappled light';
+    coverEl.className = player.exposed ? 'exposed'
+      : (!player.inWater && !(player.inPit && player.pos.y < -1) && coverE >= 0.25) ? 'dappled' : '';
     tempfillEl.style.width = player.heat.toFixed(0) + '%';
     vignetteEl.style.opacity = smooth(55, 100, player.heat) * 0.9;
     if (perfNow() > hintUntil) hintEl.style.opacity = 0;

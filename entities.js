@@ -1,6 +1,28 @@
 /* CANOPY split file  entities: particles (pollen/fireflies) and cloaked citizens (was game.js lines 2688-2926). Header/error-handler in core.js. */
 'use strict';
 /* ======================================================================== */
+/*  WIND — one cheap global state driving foliage shimmer, pollen & cloth    */
+/*  Batched chunk geometry (vine curtains, wall vines, weave fringe, grass)  */
+/*  can't be animated per-vertex, so foliage "breathes" by a shared UV-offset*/
+/*  wobble on matVine/matGrass. Particles & banners read wind.gust/dir.      */
+/* ======================================================================== */
+const wind = { dirX: 0.86, dirZ: 0.51, gust: 0, strength: 0 };
+// g(t): two sines beating together + an occasional stronger gust envelope. Range ~[-1.6, 1.9].
+function windGust(t) {
+  const base = Math.sin(t * 0.47) * 0.55 + Math.sin(t * 0.23 + 1.3) * 0.45;
+  const env = Math.max(0, Math.sin(t * 0.081 + 0.6));       // slow 0..1 swell
+  return base * (0.7 + env * env * env * 1.7);
+}
+function updateWind(time) {
+  wind.gust = windGust(time);
+  wind.strength = 0.5 + wind.gust * 0.5;                     // ~0..1.4 loose amplitude
+  // foliage shimmer: a tiny shared UV wobble — reads as leaves stirring, costs nothing.
+  const w = Math.sin(time * 1.6) * 0.0022 + wind.gust * 0.006;
+  texVine.offset.x = w; texVine.offset.y = w * 0.4;
+  texGrass.offset.x = w * 0.7;
+}
+
+/* ======================================================================== */
 /*  PARTICLES — pollen & fireflies                                          */
 /* ======================================================================== */
 function makeDrifters(n, boxR, boxH, size, color, additive) {
@@ -27,6 +49,8 @@ const flies = makeDrifters(150, 30, 4, 0.35, srgb(0x9dffb0), true);
 scene.add(flies.mesh);
 
 function updateDrifters(time, px, py, pz) {
+  updateWind(time);                                  // global wind advances every frame
+  const wpx = wind.dirX * wind.strength * 0.02, wpz = wind.dirZ * wind.strength * 0.02;   // pollen drift bias
   // pollen drifts; both wrap around the player
   for (const D of [pollen, flies]) {
     const isFly = D === flies;

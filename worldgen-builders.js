@@ -225,11 +225,17 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
   const N = 5, S = CHUNK / N;                            // 5×5 global cells, 12.8 m each
   const norm = (h) => (h >>> 0) / 4294967296;
   const placed = [];
+  const wells = [];                                       // interior light-well cells (for net hammocks)
   for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
     const gx = ix * N + i, gz = iz * N + j;
     const h = hash2(gx, gz, 4242);
     const edge = (i === 0 || j === 0 || i === N - 1 || j === N - 1);   // over the street borders
-    if (norm(h) > (edge ? 0.30 : 0.60)) continue;        // else: a light well — dappled, sky through
+    // Sky nets (Feature B): interior threshold nudged 0.60→0.66 so a little more of the
+    // canopy fills in — noticeably less open sky from the street, still dappled, not a lid.
+    if (norm(h) > (edge ? 0.30 : 0.66)) {                // else: a light well — dappled, sky through
+      if (!edge) wells.push({ x: ox + (i + 0.5) * S, z: oz + (j + 0.5) * S, h });
+      continue;
+    }
     const h2 = hash2(gx, gz, 99), h3 = hash2(gz, gx, 77);
     const jx = (((h >>> 8) & 255) / 255 - 0.5) * S * 0.5;
     const jz = (((h >>> 16) & 255) / 255 - 0.5) * S * 0.5;
@@ -258,17 +264,76 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
         [0, 0, 1, Math.max(1, Math.round(len / 2))], col);
     }
   }
-  // thin lattice limbs weaving between nearby platters — visual intertwining, no pads
+  // thin lattice limbs weaving between nearby platters — visual intertwining, no pads.
+  // Record which platter pairs a limb ties so net panels only fill the gaps that don't
+  // already have a woody link (Feature B).
+  const pairKey = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+  const linked = new Set();
   for (let k = 0; k < placed.length; k++) {
-    if (rng() < 0.55) continue;
-    let best = null, bd = 1e9;
+    let bestI = -1, bd = 1e9;
     for (let m = 0; m < placed.length; m++) {
       if (m === k) continue;
       const d = Math.hypot(placed[m].x - placed[k].x, placed[m].z - placed[k].z);
-      if (d > 6 && d < bd) { bd = d; best = placed[m]; }
+      if (d > 6 && d < bd) { bd = d; bestI = m; }
     }
-    if (best && bd < 18)
-      addLimb(B, colData, rng, placed[k].x, placed[k].y - 0.4, placed[k].z, best.x, best.y - 0.4, best.z, 0.18, { noPads: true, segs: 3, sag: 0.5 });
+    if (bestI < 0 || bd >= 18) continue;
+    if (rng() < 0.55) continue;
+    linked.add(pairKey(k, bestI));
+    addLimb(B, colData, rng, placed[k].x, placed[k].y - 0.4, placed[k].z, placed[bestI].x, placed[bestI].y - 0.4, placed[bestI].z, 0.18, { noPads: true, segs: 3, sag: 0.5 });
+  }
+
+  /* ---- Sky nets (Feature B): sagging woven panels between un-linked crown pairs,
+          horizontal hammocks half-covering some light wells, and long aerial creepers.
+          Kept clear of the canal sky-corridor so the water line stays a touch more open. */
+  const overCanal = (x, z) => {
+    const m = CANAL.half + 2;
+    if (isCanalX(ix) && Math.abs(x - ox) < m) return true;
+    if (isCanalX(ix + 1) && Math.abs(x - (ox + CHUNK)) < m) return true;
+    if (isCanalZ(iz) && Math.abs(z - oz) < m) return true;
+    if (isCanalZ(iz + 1) && Math.abs(z - (oz + CHUNK)) < m) return true;
+    return false;
+  };
+  // sagging net panels between nearby platters that no limb already ties (~3–5 / chunk)
+  let nets = 0;
+  const netCap = 5;
+  const madeNet = new Set();
+  for (let k = 0; k < placed.length && nets < netCap; k++) {
+    let bestI = -1, bd = 1e9;
+    for (let m = 0; m < placed.length; m++) {
+      if (m === k) continue;
+      const d = Math.hypot(placed[m].x - placed[k].x, placed[m].z - placed[k].z);
+      if (d > 7 && d < bd) { bd = d; bestI = m; }
+    }
+    if (bestI < 0 || bd >= 20) continue;
+    const key = pairKey(k, bestI);
+    if (linked.has(key) || madeNet.has(key)) continue;
+    if (rng() < 0.45) continue;
+    madeNet.add(key);
+    addNetPanel(B, rng, placed[k], placed[bestI]);
+    nets++;
+  }
+  // horizontal hammocks partially spanning a light well (well stays partly open); ~20% walkable
+  for (let k = 0; k < wells.length && nets < netCap; k++) {
+    const w = wells[k];
+    if (norm(hash2(w.x | 0, w.z | 0, 7788)) > 0.5) continue;   // only some wells get one
+    if (overCanal(w.x, w.z)) continue;                          // keep the canal corridor open
+    const walk = norm(hash2(w.x | 0, w.z | 0, 3311)) < 0.20;    // ~20% register a walkable pad
+    addNetHammock(B, colData, rng, w.x, w.z, 25 + norm(w.h) * 2, S * 0.5, walk);
+    nets++;
+  }
+  // aerial creepers: long diagonal/horizontal catenary vine strands crown-to-crown (20–30 m)
+  if (placed.length >= 2) {
+    const nCreep = 4 + (rng() * 5 | 0);                         // 4..8
+    for (let k = 0; k < nCreep; k++) {
+      const a = placed[(rng() * placed.length) | 0];
+      let b = null, bd = 1e9;
+      for (let m = 0; m < placed.length; m++) {
+        const d = Math.hypot(placed[m].x - a.x, placed[m].z - a.z);
+        if (d >= 18 && d <= 32 && d < bd) { bd = d; b = placed[m]; }
+      }
+      if (!b) continue;
+      addCreeper(B, rng, a.x, a.y - 0.3, a.z, b.x, b.y - 0.3, b.z);
+    }
   }
   // Vine ropes: 2–4 climbable verticals hanging from platter undersides straight down
   // to whatever rooftop lies beneath (else the ground). Placed at platter centres so a
@@ -285,6 +350,63 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
     }
     addVineRope(B, colData, rng, pl.x, pl.z, pl.y, yBot);
     ropes++;
+  }
+}
+
+// Sky nets (Feature B) --------------------------------------------------------
+// A sagging woven net panel strung between two crown platters' rims. Built as a
+// 2×3 grid of quads into B.net (matNet, alphaTest rope texture); the middle sags,
+// the ends attach just under each platter, and the whole sheet tilts with the
+// height difference of the two crowns. Visual only (no pads — see hammocks).
+const NET_COL = () => _c.copy(COL.deadwood).lerp(COL.bark, 0.4).multiplyScalar(0.85).clone();
+function addNetPanel(B, rng, A, Bp) {
+  let dx = Bp.x - A.x, dz = Bp.z - A.z; const dl = Math.hypot(dx, dz) || 1; dx /= dl; dz /= dl;
+  const px = -dz, pz = dx;                                 // width axis (perpendicular)
+  const x0 = A.x + dx * A.R * 0.8, z0 = A.z + dz * A.R * 0.8;
+  const x1 = Bp.x - dx * Bp.R * 0.8, z1 = Bp.z - dz * Bp.R * 0.8;
+  const y0 = A.y - A.R * A.flat * 0.5, y1 = Bp.y - Bp.R * Bp.flat * 0.5;
+  const width = 2.2 + rng() * 1.8, sag = 1.1 + rng() * 1.3;
+  const nu = 2 + (rng() < 0.5 ? 1 : 0), nv = 2;            // 2..3 along × 2 across
+  const col = NET_COL();
+  const P = (iu, iv) => {
+    const tu = iu / nu, tv = iv / nv - 0.5;
+    return [lerp(x0, x1, tu) + px * width * tv, lerp(y0, y1, tu) - Math.sin(tu * Math.PI) * sag, lerp(z0, z1, tu) + pz * width * tv];
+  };
+  for (let iu = 0; iu < nu; iu++) for (let iv = 0; iv < nv; iv++)
+    B.net.quad(P(iu, iv), P(iu + 1, iv), P(iu + 1, iv + 1), P(iu, iv + 1), [0, 0, 2, 2], col);
+}
+// A larger horizontal hammock net half-covering a light well (well stays partly open).
+// 2×2 quads with a gentle centre sag + slight tilt; ~20% register a walkable 'net' pad
+// set a touch below the sheet centre so landing on it feels like sinking into the sag.
+function addNetHammock(B, colData, rng, cx, cz, y, size, walk) {
+  const half = size * 0.5, sag = 0.8 + rng() * 0.9;
+  const tiltX = (rng() - 0.5) * 0.14, tiltZ = (rng() - 0.5) * 0.14;
+  const col = NET_COL();
+  const nu = 2, nv = 2;
+  const P = (iu, iv) => {
+    const u = (iu / nu - 0.5), v = (iv / nv - 0.5);
+    const bx = cx + u * size, bz = cz + v * size;
+    const by = y + u * size * tiltX + v * size * tiltZ - Math.cos(u * Math.PI) * Math.cos(v * Math.PI) * sag;
+    return [bx, by, bz];
+  };
+  for (let iu = 0; iu < nu; iu++) for (let iv = 0; iv < nv; iv++)
+    B.net.quad(P(iu, iv), P(iu + 1, iv), P(iu + 1, iv + 1), P(iu, iv + 1), [0, 0, size / 6, size / 6], col);
+  if (walk) colData.pads.push({ x: cx, z: cz, r: half * 0.7, y: y - sag * 0.5, layer: 'net' });
+}
+// A long aerial creeper: a thin vine ribbon strung crown-to-crown in a shallow catenary
+// (diagonal/horizontal, not a vertical drop). Multiple B.vine segments; sags in the middle.
+function addCreeper(B, rng, x0, y0, z0, x1, y1, z1) {
+  const segs = 5 + (rng() * 3 | 0), sag = 1.5 + rng() * 2.5, w = 0.22 + rng() * 0.16;
+  const col = _c.copy(COL.vine).multiplyScalar(0.6 + rng() * 0.3).clone();
+  const pt = (t) => [lerp(x0, x1, t), lerp(y0, y1, t) - 4 * sag * t * (1 - t), lerp(z0, z1, t)];
+  const vRep = Math.max(1, Math.round(Math.hypot(x1 - x0, z1 - z0) / 4));
+  let prev = pt(0);
+  for (let k = 1; k <= segs; k++) {
+    const cur = pt(k / segs);
+    // a thin vertical ribbon following the strand (top/bottom offset by w)
+    B.vine.quad([prev[0], prev[1] - w, prev[2]], [cur[0], cur[1] - w, cur[2]], [cur[0], cur[1] + w, cur[2]], [prev[0], prev[1] + w, prev[2]],
+      [0, 0, vRep / segs, 1], col);
+    prev = cur;
   }
 }
 
@@ -584,6 +706,17 @@ function ornOldtown(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, roofType, 
     const ch = 1.4 + rng() * 1.4;
     B.plain.addGeo(tplBox, compose(chx, h, chz, 0.7, ch, 0.7), BRICK_COL, 0.12, rng);
     B.plain.addGeo(tplBox, compose(chx, h + ch, chz, 0.9, 0.22, 0.9), BRICK_DK, 0.1, rng);
+    // Life pass: an occasional smoking oldtown chimney (runtime picks the nearest few).
+    if (rng() < 0.4) colData.smokes.push({ x: chx, y: h + ch + 0.25, z: chz, r: 0.28 });
+  }
+  // Life pass: a NEW fluttering wall-banner at a free upper face spot (not the awnings above).
+  if (rng() < 0.3 && h >= 5) {
+    const s = (rng() * 4) | 0, [u0, u1] = faceSpan(s, x0, x1, z0, z1), map = faceMap(s, x0, x1, z0, z1);
+    const uc = lerp(u0 + 0.9, u1 - 0.9, rng());
+    const [ax, az] = map(uc, 0), [bx, bz] = map(uc, 1);
+    let nx = bx - ax, nz = bz - az; const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+    const [px, pz] = map(uc, 0.14);
+    colData.bannerAnchors.push({ x: px, y: Math.min(h - 0.6, 3.2 + rng() * (h - 4)), z: pz, nx, nz, hue: (rng() * 3) | 0 });
   }
 }
 
@@ -659,6 +792,8 @@ function ornWorks(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h) {
     B.plain.addGeo(tplBox, compose(chx, 0, chz, cw, ch, cw), BRICK_COL, 0.14, rng);
     B.plain.addGeo(tplBox, compose(chx, ch, chz, cw + 0.2, 0.3, cw + 0.2), BRICK_DK, 0.1, rng);
     colData.trunks.push({ x: chx, z: chz, r: cw * 0.75, h: ch });
+    // Life pass: works-district chimneys smoke steadily (the runtime picks the nearest few).
+    colData.smokes.push({ x: chx, y: ch + 0.3, z: chz, r: 0.45 });
   }
   if (rng() < 0.35) {                                              // silo beside the shed
     const s = (rng() * 4) | 0, map = faceMap(s, x0, x1, z0, z1), [u0, u1] = faceSpan(s, x0, x1, z0, z1);
@@ -1211,5 +1346,8 @@ function addStall(B, colData, rng, x, z, ang) {
     B.plain.addGeo(tplRock, compose(fx, 0.06, fz, 0.09, 0.09, 0.09, rng(), rng() * 7, rng()), _c.copy(FRUIT_COLS[(rng() * FRUIT_COLS.length) | 0]).multiplyScalar(0.7 + rng() * 0.35).clone(), 0.25, rng);
   }
   colData.solids.push({ x0: x - 1.6, z0: z - 1.3, x1: x + 1.6, z1: z + 1.3, h: 0.9, vine: false });
+  // Life pass: a vendor/customer anchor. rot is the stall's local frame; the runtime places a
+  // vendor behind the counter (local -z) and a customer in front (local +z).
+  if (colData.stallAnchors) colData.stallAnchors.push({ x, z, rot: ang });
 }
 
