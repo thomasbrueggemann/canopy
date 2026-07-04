@@ -100,9 +100,18 @@ function canvasTex(c, repeat) {
   return t;
 }
 
-// Building facade + matching emissive (lit windows) atlas
+// Building facade + matching emissive (lit windows) atlas.
+// An 8×8 grid of window cells; the map/emissive repeat is set to 1/BLD_CELLS so that
+// one atlas cell maps to exactly one facade bay — addBuilding then asks for ~3.2 m per
+// bay, which is what reads correctly against the ~1.7 m citizens (before this the whole
+// 8×8 atlas was crammed into a single bay, giving the "dollhouse micro-grid" look).
+// Window geometry is constant DOWN each column and the floor band is constant ACROSS
+// each row, so tiling always keeps windows aligned in columns and floors; the per-column
+// style variety means a building that starts at a different phase (uo/vo) reads as a
+// genuinely different facade.
+const BLD_CELLS = 8;
 function makeBuildingTextures() {
-  const S = 512, cell = 64, r = mulberry32(1234);
+  const S = 512, cell = S / BLD_CELLS, r = mulberry32(1234);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   const e = makeCanvas(S, S), y = e.getContext('2d');
   y.fillStyle = '#000'; y.fillRect(0, 0, S, S);
@@ -118,20 +127,27 @@ function makeBuildingTextures() {
     x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.05)';
     x.fillRect(r() * S, r() * S, 2, 2);
   }
-  for (let cy = 0; cy < 8; cy++) for (let cx = 0; cx < 8; cx++) {
-    const px = cx * cell, py = cy * cell;
-    const wx = px + 14, wy = py + 9, ww = 36, wh = 44;
-    const lit = r() < 0.16, broken = !lit && r() < 0.10;
-    // frame
-    x.fillStyle = '#4c4a42'; x.fillRect(wx - 3, wy - 3, ww + 6, wh + 6);
-    if (lit) {
+  // per-column window style (held constant down the column so windows stack vertically)
+  const cols = [];
+  for (let i = 0; i < BLD_CELLS; i++) {
+    const t = r();
+    if (t < 0.12)      cols.push({ pier: true });                                // solid pier / party wall
+    else if (t < 0.30) cols.push({ ww: 18 + r() * 6, panes: 1 });                // narrow window
+    else if (t < 0.50) cols.push({ ww: 44 + r() * 8, panes: 1 });                // picture window
+    else if (t < 0.68) cols.push({ ww: 42, panes: 2 });                          // twin panes
+    else               cols.push({ ww: 32 + r() * 6, panes: 1, bal: r() < 0.35 }); // standard, maybe balcony
+  }
+  const WY = 11, WH = 40;               // floor band (constant across rows → aligned storeys)
+  // one glazed pane, drawn to both the albedo (x) and emissive (y) canvases
+  function pane(wx, wy, ww, wh, state) {
+    x.fillStyle = '#4c4a42'; x.fillRect(wx - 3, wy - 3, ww + 6, wh + 6);          // frame
+    if (state === 'lit') {
       const lg = x.createLinearGradient(0, wy, 0, wy + wh);
       lg.addColorStop(0, '#b7a684'); lg.addColorStop(1, '#7d6a45');
       x.fillStyle = lg; x.fillRect(wx, wy, ww, wh);
       y.fillStyle = '#ffb35e'; y.fillRect(wx, wy, ww, wh);
-      // mullions on the emissive too
       y.fillStyle = '#241505'; y.fillRect(wx + ww / 2 - 1, wy, 2, wh); y.fillRect(wx, wy + wh / 2 - 1, ww, 2);
-    } else if (broken) {
+    } else if (state === 'broken') {
       x.fillStyle = '#0c0f10'; x.fillRect(wx, wy, ww, wh);
       x.fillStyle = 'rgba(90,120,60,0.5)';
       for (let k = 0; k < 5; k++) x.fillRect(wx + r() * ww, wy + r() * wh, 4, 4);
@@ -142,11 +158,30 @@ function makeBuildingTextures() {
       x.fillStyle = 'rgba(255,255,255,0.08)';
       x.beginPath(); x.moveTo(wx, wy + wh); x.lineTo(wx + ww * 0.5, wy); x.lineTo(wx + ww * 0.7, wy); x.lineTo(wx + ww * 0.2, wy + wh); x.fill();
     }
-    // mullions
-    x.fillStyle = '#3c3a33';
+    x.fillStyle = '#3c3a33';                                                     // mullions
     x.fillRect(wx + ww / 2 - 1, wy, 2, wh); x.fillRect(wx, wy + wh / 2 - 1, ww, 2);
-    // sill
-    x.fillStyle = 'rgba(30,30,26,0.5)'; x.fillRect(wx - 4, wy + wh + 3, ww + 8, 3);
+    x.fillStyle = 'rgba(30,30,26,0.5)'; x.fillRect(wx - 4, wy + wh + 3, ww + 8, 3); // sill
+  }
+  for (let cy = 0; cy < BLD_CELLS; cy++) for (let cx = 0; cx < BLD_CELLS; cx++) {
+    const px = cx * cell, py = cy * cell, col = cols[cx];
+    const lit = r() < 0.16, broken = !lit && r() < 0.10;
+    const state = lit ? 'lit' : broken ? 'broken' : 'normal';
+    if (col.pier) {
+      x.fillStyle = 'rgba(0,0,0,0.06)'; x.fillRect(px + 6, py, cell - 12, cell); // faint pilaster shadow
+      if (r() < 0.25) {                                                          // occasional vent grille
+        x.fillStyle = '#3f3d36'; x.fillRect(px + cell / 2 - 8, py + 22, 16, 12);
+        x.fillStyle = 'rgba(0,0,0,0.4)'; for (let v = 0; v < 4; v++) x.fillRect(px + cell / 2 - 8, py + 24 + v * 3, 16, 1);
+      }
+    } else if (col.panes === 2) {
+      const gap = 8, pw = (col.ww - gap) / 2, x0w = px + (cell - col.ww) / 2;
+      pane(x0w, py + WY, pw, WH, state); pane(x0w + pw + gap, py + WY, pw, WH, state);
+    } else {
+      pane(px + (cell - col.ww) / 2, py + WY, col.ww, WH, state);
+      if (col.bal) {                                                             // balcony rail across the bay
+        x.fillStyle = 'rgba(35,38,32,0.8)'; x.fillRect(px + 4, py + WY + WH + 4, cell - 8, 3);
+        for (let b = 0; b < 6; b++) x.fillRect(px + 6 + b * (cell - 12) / 5, py + WY + WH + 4, 1, 6);
+      }
+    }
     // creeping moss at some cell bottoms
     if (r() < 0.4) {
       for (let k = 0; k < 14; k++) {
@@ -156,7 +191,10 @@ function makeBuildingTextures() {
       }
     }
   }
-  return { map: canvasTex(c), emissive: canvasTex(e) };
+  const map = canvasTex(c), emissive = canvasTex(e);
+  map.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  emissive.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  return { map, emissive };
 }
 
 function makeGroundTexture() {
@@ -465,16 +503,30 @@ function addWallVines(B, rng, x0, z0, x1, z1, h, side) {
   }
 }
 
+// Weathered facade tints — linear multipliers over the grey concrete atlas. Mostly
+// concrete (weighted by repetition), with the odd painted render so a street reads as a
+// mix of buildings instead of one endless grey wall.
+const FACADE_TINTS = [
+  [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.90, 0.89, 0.84], // concrete ×4
+  [1.06, 0.74, 0.55], // terracotta
+  [1.03, 0.86, 0.58], // ochre / sand
+  [0.80, 0.88, 0.67], // sage render
+  [0.72, 0.82, 0.92], // slate blue
+  [1.07, 1.00, 0.85], // cream
+  [0.98, 0.79, 0.77], // faded rose
+  [0.73, 0.90, 0.85], // pale teal
+].map(v => new THREE.Color(v[0], v[1], v[2]));
+
 function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   opts = opts || {};
   const x0 = cx - w / 2, x1 = cx + w / 2, z0 = cz - d / 2, z1 = cz + d / 2;
-  const shade = 0.72 + rng() * 0.3;
-  const warm = 0.96 + rng() * 0.08;
-  const tint = new THREE.Color(shade * warm, shade, shade * (0.92 + rng() * 0.1));
+  const tint = FACADE_TINTS[(rng() * FACADE_TINTS.length) | 0].clone().multiplyScalar(0.82 + rng() * 0.26);
   const mossy = _c.copy(tint).lerp(COL.moss, 0.6).multiplyScalar(0.75).clone();
-  const uc = Math.max(1, Math.round(w / 3.2)), ucd = Math.max(1, Math.round(d / 3.2));
-  const vc = Math.max(1, Math.round(h / 3.4));
-  const uo = (rng() * 8) | 0, vo = (rng() * 8) | 0;
+  // per-building window rhythm: bay width (~3 m) & storey height (~3.4 m) vary so facades differ
+  const bay = 2.9 + rng() * 1.4, flr = 3.0 + rng() * 0.9;
+  const uc = Math.max(1, Math.round(w / bay)), ucd = Math.max(1, Math.round(d / bay));
+  const vc = Math.max(1, Math.round(h / flr));
+  const uo = (rng() * BLD_CELLS) | 0, vo = (rng() * BLD_CELLS) | 0;
   // 4 window walls (CCW seen from outside)
   B.bld.quad([x1, 0, z1], [x1, 0, z0], [x1, h, z0], [x1, h, z1], [uo, vo, uo + ucd, vo + vc], tint, mossy);
   B.bld.quad([x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0], [uo, vo, uo + ucd, vo + vc], tint, mossy);
