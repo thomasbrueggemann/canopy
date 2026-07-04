@@ -153,3 +153,40 @@ A. District grid + style plumbing through buildChunk→addBuilding; palettes; sh
 B. Ornaments (awnings, shutters, balconies, murals, chimneys, silos, fences, arcades,
    antennas), ruin variant, glass night-glow boost, district name → style coupling
    (optional: name pools per style), tuning + headless smoke verify + screenshots.
+
+---
+
+# Waterways, Animals, Hidden Hamlet, Details
+
+## Waterways (canals)
+- Line selection like the viaduct (hash2 of street-line index, own salt, ~1/8 lines);
+  a canal replaces the road surface along that line: channel bed at y=-1.2, mossy
+  stone embankment walls, water plane at y=-0.35 (reuse matWater + water descriptor →
+  wading/heat relief works). Streets crossing a canal get an arched stone bridge
+  (walkable, low parapets); mid-block occasional plank footbridge. Reeds + lily pads
+  + drifting leaf quads. Canal chunks: reuse pit-style ground exception for the bed.
+- Where canal meets viaduct line: both render (water below, rails above).
+
+## Animals ("The Returned") — pooled, simple geometry, spawn near / despawn far
+- Ground: cats (slink along building edges, sit), boars (root in parks), frogs (hop
+  near canal/reservoir water, tiny). 
+- Sky: day bird flocks (5–9 birds, flapping V drift), dusk bats (erratic), a raptor
+  circling high above landmark chunks (colossus/spire).
+- Canopy: monkeys/squirrels leaping tree-to-tree between canopy pads in arcs.
+- Behavior: cheap state machines + sine animation; day/night rosters; no collision.
+
+## Hidden Hamlet (treehouse district + discovery challenge)
+- One deterministic chunk in ring 6–10 from spire (hash-picked, never on an anomaly):
+  grove of giants carrying a treehouse village: plank platforms (walkable pads), rope
+  bridges (limb-style with rails), stilt huts (small gable-roofed boxes on platforms),
+  ladders/vine ropes, lanterns (lamp material), 2–3 resident NPCs, glow gardens.
+- Hidden: no minimap presence until discovered (within ~25 m); dense Weave above.
+- Trial "The Rumor": trial-master gives 3 sequential cryptic waypoint clues (each a
+  real world feature: a viaduct broken span, a sinkhole, a fern circle...) — reaching
+  each within a generous radius reveals the next; final clue leads to the hamlet.
+  Completion: permanent minimap marker + unique resident errand + reward line.
+
+## Little details (sprinkle pass)
+Benches, rusted mailboxes, laundry lines between facing windows, puddle quads (dawn
+hours, fade by noon), mushroom clusters on deadwood/rubble, cobweb corner quads in
+arcades, birds' nests on lamp heads, market litter (crates, cloth scraps) near stalls.
