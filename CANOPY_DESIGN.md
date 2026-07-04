@@ -109,3 +109,47 @@ addCar or box shape), guard rails. Deck registers pads/solids for walking; piers
 ## Implementation phases
 A. Tier 1 + Tier 2 (structures, collision, heat hooks, minimap dots optional).
 B. Tier 3 oddities + messages + audio chime + tuning + headless smoke verification.
+
+---
+
+# Districts — architectural identity per neighborhood + building variance
+
+## District grid
+- District = 3×3-chunk region: `dix = Math.floor(ix/3)`, `diz = Math.floor(iz/3)`;
+  style = hash2(dix, diz, salt) pick, weighted: oldtown 25%, blocks 25%, glass 15%,
+  works 15%, garden 20%. Spire chunk keeps its build regardless.
+- Style influences: palette, building shape/height ranges, roof type, ornament set,
+  vine/moss weights, window rhythm. chunkType stays as-is (city/towers/park/... still
+  set density/layout); the district style restyles what gets built.
+
+## Styles
+- **oldtown**: h 6–13, narrow (w 7–11), warm plasters (terracotta/ochre/rose/cream),
+  pitched gable roofs (triangular prism, two sloped quads + gable ends), awnings over
+  storefronts, shutters (dark slat quads beside windows), chimneys, denser vines.
+- **blocks**: h 15–34, wide slabs (w 14–22), pale grey/beige, flat roofs, balcony grid
+  (small protruding slabs + rail on facade), occasional big faded mural rectangle
+  (2-tone painted quad), sparse ornaments, medium vines.
+- **glass**: h 25–55 in towers-chunks / 12–25 otherwise, tiered: 2–3 stacked shrinking
+  boxes with setbacks; facade tint cool blue-green, stronger night emissive (windows lit
+  more — check matBld emissive mechanism / window atlas usage for a per-building boost
+  via vertex color or second material — keep simple), roof antenna cluster, light vines.
+- **works**: h 6–12 sheds (w 16–24), sawtooth roof (3–5 asymmetric prisms), rusted
+  corrugated tint (rust/brown/dark red), brick chimney (tall thin box, darker), silo
+  cylinders, pipes between buildings, heavy vines + rust streak tint.
+- **garden**: h 4–7 small detached (w 6–9) with gaps between, hip-ish roof (pyramid),
+  pastel palette, low fences (thin boxes) around yards, garden trees + extra grass,
+  heavy greenery.
+
+## Per-building micro-variance (all districts)
+- 20% tiered (2–3 stacked boxes, shrinking 15–30% per tier, each tier gets parapet).
+- 12% ruin variant: reduced height + exposed top floor: no roof slab, ragged parapet
+  (broken segments), interior floor slab visible, heavy vines, rubble at base.
+- 15% street arcade: ground floor inset with columns (city/oldtown only).
+- balconies, corner chamfer (oldtown/glass), roofline clutter per style.
+
+## Implementation phases
+A. District grid + style plumbing through buildChunk→addBuilding; palettes; shapes:
+   pitched/sawtooth/pyramid/tiered roofs; height/width ranges; per-style vine weights.
+B. Ornaments (awnings, shutters, balconies, murals, chimneys, silos, fences, arcades,
+   antennas), ruin variant, glass night-glow boost, district name → style coupling
+   (optional: name pools per style), tuning + headless smoke verify + screenshots.

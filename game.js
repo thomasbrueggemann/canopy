@@ -137,85 +137,181 @@ function canvasTex(c, repeat) {
 // genuinely different facade.
 const BLD_CELLS = 8;
 function makeBuildingTextures() {
-  const S = 512, cell = S / BLD_CELLS, r = mulberry32(1234);
+  // 1024px atlas → 128px per bay: windows read as glass with reveals and streaks
+  // instead of 64px blobs. Realism comes from four things real weathered concrete
+  // has: storey slab bands, recessed window reveals, rain streaks running DOWN from
+  // sills, and large-scale tonal mottling — not from more speckle noise.
+  const S = 1024, cell = S / BLD_CELLS, r = mulberry32(1234);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   const e = makeCanvas(S, S), y = e.getContext('2d');
   y.fillStyle = '#000'; y.fillRect(0, 0, S, S);
-  // concrete base with vertical grime
+  // concrete base: vertical gradient + large soft mottling (patchy discoloration)
   const g = x.createLinearGradient(0, 0, 0, S);
-  g.addColorStop(0, '#8f8d82'); g.addColorStop(1, '#77756b');
+  g.addColorStop(0, '#918f84'); g.addColorStop(1, '#787468');
   x.fillStyle = g; x.fillRect(0, 0, S, S);
-  for (let i = 0; i < 90; i++) {
-    x.fillStyle = `rgba(40,45,38,${0.03 + r() * 0.07})`;
-    const w = 2 + r() * 8; x.fillRect(r() * S, 0, w, S);
+  for (let i = 0; i < 46; i++) {
+    const mx = r() * S, my = r() * S, mr = 60 + r() * 190;
+    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
+    const dark = r() < 0.6;
+    gg.addColorStop(0, dark ? `rgba(52,54,46,${0.05 + r() * 0.08})` : `rgba(210,206,190,${0.04 + r() * 0.06})`);
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
   }
-  for (let i = 0; i < 1800; i++) {
-    x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.06)' : 'rgba(255,255,255,0.05)';
+  // long vertical grime runs from the top of the facade
+  for (let i = 0; i < 70; i++) {
+    const gx = r() * S, gw = 3 + r() * 12, gl = S * (0.3 + r() * 0.7);
+    const gg = x.createLinearGradient(0, 0, 0, gl);
+    gg.addColorStop(0, `rgba(42,46,38,${0.05 + r() * 0.09})`); gg.addColorStop(1, 'rgba(42,46,38,0)');
+    x.fillStyle = gg; x.fillRect(gx, 0, gw, gl);
+  }
+  // fine grain
+  for (let i = 0; i < 5200; i++) {
+    x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.04)';
     x.fillRect(r() * S, r() * S, 2, 2);
+  }
+  // spalled patches: plaster fallen off, lighter core with a darker rim
+  for (let i = 0; i < 14; i++) {
+    const sx = r() * S, sy = r() * S, sr = 9 + r() * 26;
+    x.fillStyle = 'rgba(48,46,40,0.35)';
+    x.beginPath();
+    for (let k = 0; k <= 8; k++) { const a = k / 8 * Math.PI * 2, rr = sr * (0.7 + r() * 0.5); x.lineTo(sx + Math.cos(a) * rr, sy + Math.sin(a) * rr); }
+    x.fill();
+    x.fillStyle = `rgba(${168 + r() * 26 | 0},${160 + r() * 22 | 0},${142 + r() * 18 | 0},0.8)`;
+    x.beginPath();
+    for (let k = 0; k <= 8; k++) { const a = k / 8 * Math.PI * 2, rr = sr * 0.72 * (0.7 + r() * 0.5); x.lineTo(sx + Math.cos(a) * rr, sy + Math.sin(a) * rr); }
+    x.fill();
+  }
+  // hairline cracks wandering mostly downward
+  x.strokeStyle = 'rgba(38,38,32,0.35)'; x.lineWidth = 1.5;
+  for (let i = 0; i < 22; i++) {
+    let px = r() * S, py = r() * S * 0.7;
+    x.beginPath(); x.moveTo(px, py);
+    for (let k = 0; k < 7; k++) { px += (r() - 0.5) * 26; py += 10 + r() * 34; x.lineTo(px, py); }
+    x.stroke();
   }
   // per-column window style (held constant down the column so windows stack vertically)
   const cols = [];
   for (let i = 0; i < BLD_CELLS; i++) {
     const t = r();
-    if (t < 0.12)      cols.push({ pier: true });                                // solid pier / party wall
-    else if (t < 0.30) cols.push({ ww: 18 + r() * 6, panes: 1 });                // narrow window
-    else if (t < 0.50) cols.push({ ww: 44 + r() * 8, panes: 1 });                // picture window
-    else if (t < 0.68) cols.push({ ww: 42, panes: 2 });                          // twin panes
-    else               cols.push({ ww: 32 + r() * 6, panes: 1, bal: r() < 0.35 }); // standard, maybe balcony
+    if (t < 0.12)      cols.push({ pier: true });                                 // solid pier / party wall
+    else if (t < 0.30) cols.push({ ww: 36 + r() * 12, panes: 1 });                // narrow window
+    else if (t < 0.50) cols.push({ ww: 88 + r() * 16, panes: 1 });                // picture window
+    else if (t < 0.68) cols.push({ ww: 84, panes: 2 });                           // twin panes
+    else               cols.push({ ww: 64 + r() * 12, panes: 1, bal: r() < 0.35 }); // standard, maybe balcony
   }
-  const WY = 11, WH = 40;               // floor band (constant across rows → aligned storeys)
+  const WY = 22, WH = 80;               // floor band (constant across rows → aligned storeys)
+  // glass tone families — real streets mix dead-dark glass, greenish reflection,
+  // pale sky bounce; one gradient everywhere is what reads "video-gamey"
+  const GLASS = [
+    ['#38444c', '#161c20'], ['#2c3a36', '#121a16'], ['#1a2024', '#0b0e10'],
+    ['#546a76', '#26343c'], ['#4a5a50', '#1e2822'], ['#243038', '#101418']
+  ];
   // one glazed pane, drawn to both the albedo (x) and emissive (y) canvases
   function pane(wx, wy, ww, wh, state) {
-    x.fillStyle = '#4c4a42'; x.fillRect(wx - 3, wy - 3, ww + 6, wh + 6);          // frame
+    // recessed reveal: dark surround, deepest at the top (glass sits back from the wall)
+    x.fillStyle = 'rgba(30,30,26,0.55)'; x.fillRect(wx - 7, wy - 7, ww + 14, wh + 14);
+    x.fillStyle = '#4c4a42'; x.fillRect(wx - 4, wy - 4, ww + 8, wh + 8);          // frame
     if (state === 'lit') {
       const lg = x.createLinearGradient(0, wy, 0, wy + wh);
       lg.addColorStop(0, '#b7a684'); lg.addColorStop(1, '#7d6a45');
       x.fillStyle = lg; x.fillRect(wx, wy, ww, wh);
       y.fillStyle = '#ffb35e'; y.fillRect(wx, wy, ww, wh);
-      y.fillStyle = '#241505'; y.fillRect(wx + ww / 2 - 1, wy, 2, wh); y.fillRect(wx, wy + wh / 2 - 1, ww, 2);
+      y.fillStyle = '#241505'; y.fillRect(wx + ww / 2 - 2, wy, 3, wh); y.fillRect(wx, wy + wh / 2 - 2, ww, 3);
     } else if (state === 'broken') {
       x.fillStyle = '#0c0f10'; x.fillRect(wx, wy, ww, wh);
-      x.fillStyle = 'rgba(90,120,60,0.5)';
-      for (let k = 0; k < 5; k++) x.fillRect(wx + r() * ww, wy + r() * wh, 4, 4);
+      x.fillStyle = 'rgba(150,160,170,0.35)';                                    // clinging shards
+      for (let k = 0; k < 4; k++) {
+        const bx2 = wx + r() * ww, by2 = wy + (r() < 0.5 ? 0 : wh);
+        x.beginPath(); x.moveTo(bx2, by2); x.lineTo(bx2 - 6 - r() * 8, by2 + (by2 > wy ? -1 : 1) * (8 + r() * 14)); x.lineTo(bx2 + 6 + r() * 8, by2); x.fill();
+      }
+      x.fillStyle = 'rgba(90,120,60,0.5)';                                       // moss creeping inside
+      for (let k = 0; k < 6; k++) { const mr2 = 3 + r() * 6; x.beginPath(); x.arc(wx + r() * ww, wy + wh - r() * 12, mr2, 0, 7); x.fill(); }
     } else {
+      const tone = GLASS[(r() * GLASS.length) | 0];
       const dg = x.createLinearGradient(0, wy, 0, wy + wh);
-      dg.addColorStop(0, '#39505c'); dg.addColorStop(1, '#1c262c');
+      dg.addColorStop(0, tone[0]); dg.addColorStop(1, tone[1]);
       x.fillStyle = dg; x.fillRect(wx, wy, ww, wh);
-      x.fillStyle = 'rgba(255,255,255,0.08)';
-      x.beginPath(); x.moveTo(wx, wy + wh); x.lineTo(wx + ww * 0.5, wy); x.lineTo(wx + ww * 0.7, wy); x.lineTo(wx + ww * 0.2, wy + wh); x.fill();
+      // interior shadow under the head of the reveal
+      x.fillStyle = 'rgba(0,0,0,0.35)'; x.fillRect(wx, wy, ww, 6);
+      // diagonal sky reflection, varying slope and strength
+      if (r() < 0.8) {
+        const sl = 0.3 + r() * 0.4, o = r() * 0.5;
+        x.fillStyle = `rgba(200,215,220,${0.05 + r() * 0.1})`;
+        x.beginPath();
+        x.moveTo(wx + ww * o, wy + wh); x.lineTo(wx + ww * (o + sl), wy);
+        x.lineTo(wx + ww * (o + sl + 0.18), wy); x.lineTo(wx + ww * (o + 0.18), wy + wh); x.fill();
+      }
+      // some windows keep curtains / blinds: pale inner band at a random height
+      if (r() < 0.3) {
+        x.fillStyle = 'rgba(190,180,150,0.18)';
+        const ch = wh * (0.25 + r() * 0.4);
+        x.fillRect(wx + 2, wy + (r() < 0.6 ? 6 : wh - ch), ww - 4, ch);
+      }
     }
     x.fillStyle = '#3c3a33';                                                     // mullions
-    x.fillRect(wx + ww / 2 - 1, wy, 2, wh); x.fillRect(wx, wy + wh / 2 - 1, ww, 2);
-    x.fillStyle = 'rgba(30,30,26,0.5)'; x.fillRect(wx - 4, wy + wh + 3, ww + 8, 3); // sill
+    x.fillRect(wx + ww / 2 - 2, wy, 3, wh); x.fillRect(wx, wy + wh / 2 - 2, ww, 3);
+    // sill with a bright top edge, then rain streaks running down from its ends
+    x.fillStyle = 'rgba(200,196,180,0.5)'; x.fillRect(wx - 8, wy + wh + 6, ww + 16, 2);
+    x.fillStyle = 'rgba(30,30,26,0.6)'; x.fillRect(wx - 8, wy + wh + 8, ww + 16, 4);
+    const nStreak = 1 + (r() * 3 | 0);
+    for (let k = 0; k < nStreak; k++) {
+      const sx2 = wx - 6 + r() * (ww + 12), sw2 = 2 + r() * 4, sl2 = 14 + r() * 40;
+      const sg = x.createLinearGradient(0, wy + wh + 12, 0, wy + wh + 12 + sl2);
+      sg.addColorStop(0, `rgba(44,48,40,${0.18 + r() * 0.2})`); sg.addColorStop(1, 'rgba(44,48,40,0)');
+      x.fillStyle = sg; x.fillRect(sx2, wy + wh + 12, sw2, sl2);
+    }
+    // occasional rust bleed from a window-corner fixing
+    if (r() < 0.18) {
+      const rx2 = r() < 0.5 ? wx - 5 : wx + ww + 2, rl2 = 10 + r() * 26;
+      const rg = x.createLinearGradient(0, wy + wh, 0, wy + wh + rl2);
+      rg.addColorStop(0, 'rgba(122,72,40,0.4)'); rg.addColorStop(1, 'rgba(122,72,40,0)');
+      x.fillStyle = rg; x.fillRect(rx2, wy + wh, 3, rl2);
+    }
   }
   for (let cy = 0; cy < BLD_CELLS; cy++) for (let cx = 0; cx < BLD_CELLS; cx++) {
     const px = cx * cell, py = cy * cell, col = cols[cx];
     const lit = r() < 0.16, broken = !lit && r() < 0.10;
     const state = lit ? 'lit' : broken ? 'broken' : 'normal';
     if (col.pier) {
-      x.fillStyle = 'rgba(0,0,0,0.06)'; x.fillRect(px + 6, py, cell - 12, cell); // faint pilaster shadow
-      if (r() < 0.25) {                                                          // occasional vent grille
-        x.fillStyle = '#3f3d36'; x.fillRect(px + cell / 2 - 8, py + 22, 16, 12);
-        x.fillStyle = 'rgba(0,0,0,0.4)'; for (let v = 0; v < 4; v++) x.fillRect(px + cell / 2 - 8, py + 24 + v * 3, 16, 1);
+      x.fillStyle = 'rgba(0,0,0,0.06)'; x.fillRect(px + 12, py, cell - 24, cell); // faint pilaster shadow
+      if (r() < 0.25) {                                                           // occasional vent grille
+        x.fillStyle = '#3f3d36'; x.fillRect(px + cell / 2 - 16, py + 44, 32, 24);
+        x.fillStyle = 'rgba(0,0,0,0.4)'; for (let v = 0; v < 5; v++) x.fillRect(px + cell / 2 - 16, py + 48 + v * 5, 32, 2);
+        // grime shadow under the grille
+        const vg = x.createLinearGradient(0, py + 68, 0, py + 108);
+        vg.addColorStop(0, 'rgba(40,42,36,0.28)'); vg.addColorStop(1, 'rgba(40,42,36,0)');
+        x.fillStyle = vg; x.fillRect(px + cell / 2 - 14, py + 68, 28, 40);
       }
     } else if (col.panes === 2) {
-      const gap = 8, pw = (col.ww - gap) / 2, x0w = px + (cell - col.ww) / 2;
+      const gap = 16, pw = (col.ww - gap) / 2, x0w = px + (cell - col.ww) / 2;
       pane(x0w, py + WY, pw, WH, state); pane(x0w + pw + gap, py + WY, pw, WH, state);
     } else {
       pane(px + (cell - col.ww) / 2, py + WY, col.ww, WH, state);
-      if (col.bal) {                                                             // balcony rail across the bay
-        x.fillStyle = 'rgba(35,38,32,0.8)'; x.fillRect(px + 4, py + WY + WH + 4, cell - 8, 3);
-        for (let b = 0; b < 6; b++) x.fillRect(px + 6 + b * (cell - 12) / 5, py + WY + WH + 4, 1, 6);
+      if (col.bal) {                                                              // balcony rail across the bay
+        x.fillStyle = 'rgba(35,38,32,0.8)'; x.fillRect(px + 8, py + WY + WH + 12, cell - 16, 5);
+        for (let b = 0; b < 7; b++) x.fillRect(px + 12 + b * (cell - 24) / 6, py + WY + WH + 12, 2, 13);
       }
     }
     // creeping moss at some cell bottoms
     if (r() < 0.4) {
-      for (let k = 0; k < 14; k++) {
-        x.fillStyle = `rgba(${60 + r() * 30},${95 + r() * 40},${40 + r() * 20},${0.25 + r() * 0.3})`;
-        const mr = 3 + r() * 9;
-        x.beginPath(); x.arc(px + r() * cell, py + cell - r() * 14, mr, 0, 7); x.fill();
+      for (let k = 0; k < 16; k++) {
+        x.fillStyle = `rgba(${60 + r() * 30},${95 + r() * 40},${40 + r() * 20},${0.22 + r() * 0.28})`;
+        const mr = 5 + r() * 16;
+        x.beginPath(); x.arc(px + r() * cell, py + cell - r() * 24, mr, 0, 7); x.fill();
       }
     }
+  }
+  // storey slab bands across every floor line: light worn top edge + shadow below.
+  // Drawn LAST so they sit over grime/streaks like a real projecting slab edge.
+  for (let cy = 0; cy <= BLD_CELLS; cy++) {
+    const by = (cy * cell) % S;
+    x.fillStyle = 'rgba(205,200,184,0.34)'; x.fillRect(0, by, S, 3);
+    x.fillStyle = 'rgba(28,28,24,0.4)'; x.fillRect(0, by + 3, S, 5);
+    x.fillStyle = 'rgba(28,28,24,0.14)'; x.fillRect(0, by + 8, S, 5);
+  }
+  // faint panel joints between bays
+  for (let cx2 = 0; cx2 < BLD_CELLS; cx2++) {
+    x.fillStyle = 'rgba(30,30,26,0.16)'; x.fillRect(cx2 * cell, 0, 2, S);
   }
   const map = canvasTex(c), emissive = canvasTex(e);
   map.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
@@ -227,17 +323,42 @@ function makeGroundTexture() {
   const S = 512, r = mulberry32(77);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.fillStyle = '#4e4d46'; x.fillRect(0, 0, S, S);
+  // large-scale tonal patches first — worn ground is blotchy before it is grainy
+  for (let i = 0; i < 40; i++) {
+    const mx = r() * S, my = r() * S, mr = 40 + r() * 140;
+    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
+    const dark = r() < 0.55;
+    gg.addColorStop(0, dark ? `rgba(30,31,26,${0.06 + r() * 0.1})` : `rgba(140,136,120,${0.05 + r() * 0.08})`);
+    gg.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
+  }
   for (let i = 0; i < 5000; i++) {
     x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.05)';
     x.fillRect(r() * S, r() * S, 2, 2);
   }
-  // cracks
-  x.strokeStyle = 'rgba(25,26,22,0.55)'; x.lineWidth = 2;
+  // old oil / damp stains
+  for (let i = 0; i < 8; i++) {
+    x.fillStyle = `rgba(18,18,20,${0.1 + r() * 0.12})`;
+    x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
+    x.beginPath(); x.ellipse(0, 0, 10 + r() * 26, 6 + r() * 14, 0, 0, 7); x.fill(); x.restore();
+  }
+  // cracks: a pale worn edge beside each dark line makes them read as depth
   for (let i = 0; i < 26; i++) {
     let px = r() * S, py = r() * S;
-    x.beginPath(); x.moveTo(px, py);
-    for (let k = 0; k < 6; k++) { px += (r() - 0.5) * 90; py += (r() - 0.5) * 90; x.lineTo(px, py); }
-    x.stroke();
+    const pts = [[px, py]];
+    for (let k = 0; k < 6; k++) { px += (r() - 0.5) * 90; py += (r() - 0.5) * 90; pts.push([px, py]); }
+    x.strokeStyle = 'rgba(150,146,130,0.3)'; x.lineWidth = 3;
+    x.beginPath(); x.moveTo(pts[0][0] + 1, pts[0][1] + 1);
+    for (const p of pts) x.lineTo(p[0] + 1, p[1] + 1); x.stroke();
+    x.strokeStyle = 'rgba(25,26,22,0.6)'; x.lineWidth = 1.6;
+    x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
+    for (const p of pts) x.lineTo(p[0], p[1]); x.stroke();
+    // grass sprouting from some cracks
+    if (r() < 0.5) for (const p of pts) {
+      if (r() < 0.4) continue;
+      x.fillStyle = `rgba(${70 + r() * 30 | 0},${100 + r() * 40 | 0},${45 + r() * 20 | 0},${0.3 + r() * 0.3})`;
+      x.beginPath(); x.arc(p[0], p[1], 2 + r() * 4, 0, 7); x.fill();
+    }
   }
   // moss blotches
   for (let i = 0; i < 90; i++) {
@@ -262,12 +383,26 @@ function makeLeafTexture() {
   const S = 256, r = mulberry32(5150);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.clearRect(0, 0, S, S);
-  for (let i = 0; i < 210; i++) {
-    const hpx = 78 + (r() - 0.5) * 40, s = 40 + r() * 25, l = 42 + r() * 22;
-    x.fillStyle = `hsl(${hpx},${s}%,${l}%)`;
-    x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
-    x.beginPath(); x.ellipse(0, 0, 8 + r() * 13, 4 + r() * 6, 0, 0, 7); x.fill();
-    x.restore();
+  // dark under-layer leaves first, lit leaves on top — foliage depth comes from
+  // shadowed leaves showing between the bright ones, not from a flat confetti layer
+  for (let layer = 0; layer < 2; layer++) {
+    const n = layer === 0 ? 130 : 150, shade = layer === 0;
+    for (let i = 0; i < n; i++) {
+      const hpx = 82 + (r() - 0.5) * 38, s = 38 + r() * 26;
+      const l = shade ? 16 + r() * 14 : 40 + r() * 24;
+      const rw = 8 + r() * 13, rh = 4 + r() * 6;
+      x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
+      x.fillStyle = `hsl(${hpx},${s}%,${l}%)`;
+      x.beginPath(); x.ellipse(0, 0, rw, rh, 0, 0, 7); x.fill();
+      if (!shade) {
+        // lit upper half + darker midrib give each leaf a fold
+        x.fillStyle = `hsl(${hpx},${s}%,${Math.min(72, l + 12)}%)`;
+        x.beginPath(); x.ellipse(0, -rh * 0.3, rw * 0.85, rh * 0.55, 0, 0, 7); x.fill();
+        x.strokeStyle = `hsl(${hpx},${s + 8}%,${Math.max(10, l - 18)}%)`; x.lineWidth = 1;
+        x.beginPath(); x.moveTo(-rw * 0.8, 0); x.lineTo(rw * 0.8, 0); x.stroke();
+      }
+      x.restore();
+    }
   }
   return canvasTex(c);
 }
@@ -278,16 +413,37 @@ function makeVineTexture() {
   x.clearRect(0, 0, W, H);
   for (let s = 0; s < 8; s++) {
     const bx = 14 + s * 32 + r() * 8, amp = 6 + r() * 12, ph = r() * 7;
-    x.strokeStyle = `rgba(${38 + r() * 20 | 0},${64 + r() * 25 | 0},${30 + r() * 15 | 0},0.95)`;
-    x.lineWidth = 4 + r() * 4;
+    // woody stem with a darker shadow line beside it
+    x.strokeStyle = 'rgba(24,28,18,0.6)'; x.lineWidth = 6 + r() * 4;
+    x.beginPath();
+    for (let yy = 0; yy <= H; yy += 8) x.lineTo(bx + 1.5 + Math.sin(yy * 0.03 + ph) * amp, yy);
+    x.stroke();
+    x.strokeStyle = `rgba(${48 + r() * 22 | 0},${70 + r() * 25 | 0},${34 + r() * 15 | 0},0.95)`;
+    x.lineWidth = 3.5 + r() * 3;
     x.beginPath();
     for (let yy = 0; yy <= H; yy += 8) x.lineTo(bx + Math.sin(yy * 0.03 + ph) * amp, yy);
     x.stroke();
+    // fine side tendrils curling off the stem
+    for (let t = 0; t < 4; t++) {
+      const ty = r() * H, dir = r() < 0.5 ? -1 : 1, tl = 10 + r() * 22;
+      const tx0 = bx + Math.sin(ty * 0.03 + ph) * amp;
+      x.strokeStyle = `rgba(${60 + r() * 25 | 0},${90 + r() * 30 | 0},${45 + r() * 18 | 0},0.8)`;
+      x.lineWidth = 1.2;
+      x.beginPath(); x.moveTo(tx0, ty);
+      x.quadraticCurveTo(tx0 + dir * tl * 0.7, ty + 4, tx0 + dir * tl, ty + 10 + r() * 8);
+      x.stroke();
+    }
     for (let yy = 6; yy < H; yy += 12 + r() * 14) {
       const lx = bx + Math.sin(yy * 0.03 + ph) * amp;
-      x.fillStyle = `hsl(${85 + (r() - 0.5) * 35},${40 + r() * 25}%,${40 + r() * 24}%)`;
+      const hpx = 85 + (r() - 0.5) * 35, sat = 40 + r() * 25, lig = 34 + r() * 24;
+      const rw = 7 + r() * 8, rh = 4 + r() * 4;
       x.save(); x.translate(lx, yy); x.rotate(r() * 7);
-      x.beginPath(); x.ellipse(0, 0, 7 + r() * 8, 4 + r() * 4, 0, 0, 7); x.fill();
+      x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
+      x.beginPath(); x.ellipse(0, 0, rw, rh, 0, 0, 7); x.fill();
+      x.fillStyle = `hsl(${hpx},${sat}%,${Math.min(70, lig + 11)}%)`;   // lit half
+      x.beginPath(); x.ellipse(0, -rh * 0.3, rw * 0.8, rh * 0.5, 0, 0, 7); x.fill();
+      x.strokeStyle = `hsl(${hpx},${sat}%,${Math.max(12, lig - 16)}%)`; x.lineWidth = 1;
+      x.beginPath(); x.moveTo(-rw * 0.75, 0); x.lineTo(rw * 0.75, 0); x.stroke();
       x.restore();
     }
   }
@@ -298,14 +454,25 @@ function makeGrassTexture() {
   const S = 256, r = mulberry32(303);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.clearRect(0, 0, S, S);
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 100; i++) {
     const bx = r() * S, h = 90 + r() * 150, bend = (r() - 0.5) * 70, w = 5 + r() * 7;
-    x.fillStyle = `hsl(${80 + (r() - 0.5) * 30},${42 + r() * 25}%,${36 + r() * 24}%)`;
+    // ~1 in 6 blades dried out; the rest green with a brighter edge stroke
+    const dry = r() < 0.16;
+    const hpx = dry ? 52 + r() * 12 : 80 + (r() - 0.5) * 30;
+    const sat = dry ? 38 + r() * 15 : 42 + r() * 25;
+    const lig = dry ? 38 + r() * 18 : 30 + r() * 22;
+    x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
     x.beginPath();
     x.moveTo(bx - w / 2, S);
     x.quadraticCurveTo(bx + bend * 0.3, S - h * 0.6, bx + bend, S - h);
     x.quadraticCurveTo(bx + bend * 0.3 + w * 0.4, S - h * 0.6, bx + w / 2, S);
     x.fill();
+    // lit edge along one side of the blade
+    x.strokeStyle = `hsl(${hpx},${sat}%,${Math.min(72, lig + 16)}%)`; x.lineWidth = 1.4;
+    x.beginPath();
+    x.moveTo(bx - w / 2, S);
+    x.quadraticCurveTo(bx + bend * 0.3, S - h * 0.6, bx + bend, S - h);
+    x.stroke();
   }
   return canvasTex(c);
 }
@@ -466,9 +633,21 @@ function leafTintByY(base, y) {
 /* ----------------------------------------------------------- city naming -- */
 const NAME_A = ['Moss', 'Fern', 'Ivy', 'Bramble', 'Kudzu', 'Willow', 'Cedar', 'Banyan', 'Lichen', 'Sorrel', 'Alder', 'Rowan', 'Verdan', 'Hollow', 'Arbor', 'Tendril'];
 const NAME_B = [' Row', ' Gate', ' Yards', ' Hollow', ' Cross', ' Terrace', ' Quarter', ' Reach', ' Steps', ' Court', 'field', ' Rise'];
+// Districts (Phase B): per-style suffix flavour, biased in ~55% of chunks so a
+// neighbourhood's name hints at its architecture. Deterministic on its own salt.
+const NAME_STYLE = {
+  works: [' Foundry', ' Mill', ' Yards', ' Works'],
+  garden: [' Gardens', ' Lanes', ' Green', ' Orchard'],
+  glass: [' Heights', ' Crown', ' Spires', ' Vista'],
+  oldtown: [' Old Quarter', ' Steps', ' Lane', ' Wynd'],
+  blocks: [' Estates', ' Blocks', ' Court', ' Terrace'],
+};
 function districtName(ix, iz) {
   if (ix === SPIRE.cx && iz === SPIRE.cz) return 'The Spire';
-  return NAME_A[hash2(ix, iz, 7) % NAME_A.length] + NAME_B[hash2(ix, iz, 13) % NAME_B.length];
+  const a = NAME_A[hash2(ix, iz, 7) % NAME_A.length];
+  const pool = NAME_STYLE[districtStyle(ix, iz)];
+  if (pool && hash2(ix, iz, 21) % 100 < 55) return a + pool[hash2(ix, iz, 23) % pool.length];
+  return a + NAME_B[hash2(ix, iz, 13) % NAME_B.length];
 }
 
 /* ======================================================================== */
@@ -820,67 +999,458 @@ function addWallVines(B, rng, x0, z0, x1, z1, h, side) {
   }
 }
 
-// Weathered facade tints — linear multipliers over the grey concrete atlas. Mostly
-// concrete (weighted by repetition), with the odd painted render so a street reads as a
-// mix of buildings instead of one endless grey wall.
-const FACADE_TINTS = [
-  [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.90, 0.89, 0.84], // concrete ×4
-  [1.06, 0.74, 0.55], // terracotta
-  [1.03, 0.86, 0.58], // ochre / sand
-  [0.80, 0.88, 0.67], // sage render
-  [0.72, 0.82, 0.92], // slate blue
-  [1.07, 1.00, 0.85], // cream
-  [0.98, 0.79, 0.77], // faded rose
-  [0.73, 0.90, 0.85], // pale teal
-].map(v => new THREE.Color(v[0], v[1], v[2]));
+// Weathered facade tints — linear multipliers over the grey concrete atlas. Districts
+// (Phase A) swap the pool per neighbourhood so each reads as its own architecture; the
+// blocks pool doubles as the neutral fallback (concrete-heavy, the odd painted render).
+function mkTints(a) { return a.map(v => new THREE.Color(v[0], v[1], v[2])); }
+const FACADE_TINTS = mkTints([          // blocks: pale grey / beige concrete
+  [0.95, 0.94, 0.88], [0.95, 0.94, 0.88], [0.90, 0.89, 0.84], [0.86, 0.87, 0.85],
+  [0.92, 0.90, 0.85], [0.82, 0.83, 0.82]
+]);
+const STYLE_TINTS = {
+  oldtown: mkTints([                     // warm plasters
+    [1.06, 0.74, 0.55], [1.03, 0.86, 0.58], [0.98, 0.79, 0.77], [1.07, 1.00, 0.85], [1.02, 0.80, 0.62]
+  ]),
+  blocks: FACADE_TINTS,
+  glass: mkTints([                       // cool blue-greens
+    [0.72, 0.82, 0.92], [0.73, 0.90, 0.85], [0.68, 0.86, 0.88], [0.75, 0.86, 0.80], [0.66, 0.80, 0.90]
+  ]),
+  works: mkTints([                       // rust / brown / dark red
+    [0.66, 0.42, 0.30], [0.55, 0.40, 0.32], [0.60, 0.34, 0.30], [0.70, 0.52, 0.36], [0.48, 0.38, 0.34]
+  ]),
+  garden: mkTints([                      // pastels
+    [0.98, 0.86, 0.88], [0.83, 0.92, 0.83], [1.02, 0.98, 0.82], [0.88, 0.85, 0.95], [0.82, 0.90, 0.96]
+  ]),
+};
+// Per-style build config: window rhythm [base,range] for bay & floor, vine weight,
+// roof kind, and roof colour (null → default weathered concrete roof).
+const STYLE_CFG = {
+  oldtown: { bay: [2.4, 1.0], flr: [3.0, 0.7], vine: 1.15, roof: 'gable', rc: 0x6b3f2f },
+  blocks: { bay: [3.0, 1.6], flr: [3.2, 0.9], vine: 0.9, roof: 'flat', rc: null },
+  glass: { bay: [2.0, 0.9], flr: [3.4, 0.9], vine: 0.45, roof: 'flat', rc: null, tiered: true },
+  works: { bay: [4.6, 2.0], flr: [4.2, 1.4], vine: 1.1, roof: 'saw', rc: 0x6a4a35 },
+  garden: { bay: [3.0, 1.1], flr: [3.0, 0.7], vine: 1.15, roof: 'hip', rc: 0x4e5a52 },
+};
+// District grid: 3×3-chunk regions, weighted style pick on its own salt.
+const DISTRICT_SALT = 8123;
+function districtStyle(ix, iz) {
+  const r = hash2(Math.floor(ix / 3), Math.floor(iz / 3), DISTRICT_SALT) / 4294967296;
+  if (r < 0.25) return 'oldtown';
+  if (r < 0.50) return 'blocks';
+  if (r < 0.65) return 'glass';
+  if (r < 0.80) return 'works';
+  return 'garden';
+}
+let CUR_STYLE = 'blocks';   // set per chunk by buildChunk; read by addBuilding
+
+// Per-style building footprint + height ranges, applied where buildChunk sizes buildings.
+// `tall` requests the taller end (towers-chunk / perimeter feature). Returns {w,d,h}.
+function bldDims(style, rng, tall) {
+  switch (style) {
+    case 'oldtown': return { w: 7 + rng() * 4, d: 8 + rng() * 3, h: 6 + rng() * 7 };
+    case 'glass': return { w: 11 + rng() * 6, d: 11 + rng() * 6, h: tall ? 28 + rng() * 27 : 12 + rng() * 13 };
+    case 'works': return { w: 16 + rng() * 8, d: 14 + rng() * 6, h: 6 + rng() * 6 };
+    case 'garden': return { w: 6 + rng() * 3, d: 6 + rng() * 3, h: 4 + rng() * 3 };
+    default: return { w: 14 + rng() * 8, d: 11 + rng() * 5, h: tall ? 20 + rng() * 14 : 15 + rng() * 12 }; // blocks
+  }
+}
+
+// Emit the 4 window walls of one box tier from y0 up by h. vFloorBase continues the
+// atlas floor phase so window rows line up across stacked tiers. Returns floors used.
+function bldWalls(B, x0, z0, x1, z1, y0, h, bay, flr, tint, mossy, vFloorBase, uo, vo) {
+  const w = x1 - x0, d = z1 - z0, y1 = y0 + h;
+  const uc = Math.max(1, Math.round(w / bay)), ucd = Math.max(1, Math.round(d / bay));
+  const vc = Math.max(1, Math.round(h / flr));
+  const vb = vo + vFloorBase, vt = vb + vc;
+  const low = (y0 <= 0.02) ? mossy : tint;         // moss creep only at true ground level
+  B.bld.quad([x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1], [uo, vb, uo + ucd, vt], tint, low);
+  B.bld.quad([x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0], [uo, vb, uo + ucd, vt], tint, low);
+  B.bld.quad([x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1], [uo, vb, uo + uc, vt], tint, low);
+  B.bld.quad([x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0], [uo, vb, uo + uc, vt], tint, low);
+  return vc;
+}
+// Pitched gable roof: two sloped quads + two triangular gable ends (facade tint), ridge
+// along the long horizontal axis. Slopes/ends to B.plain (no window texture on the roof).
+function addGableRoof(B, x0, z0, x1, z1, y, roofCol, gableCol) {
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2, w = x1 - x0, d = z1 - z0;
+  const rh = clamp(Math.min(w, d) * 0.45, 1.4, 4.5);
+  if (w >= d) {                                    // ridge runs along x, eaves at z0 / z1
+    B.plain.quad([x1, y, z0], [x0, y, z0], [x0, y + rh, cz], [x1, y + rh, cz], [0, 0, 1, 1], roofCol);
+    B.plain.quad([x0, y, z1], [x1, y, z1], [x1, y + rh, cz], [x0, y + rh, cz], [0, 0, 1, 1], roofCol);
+    B.plain.quad([x0, y, z0], [x0, y, z1], [x0, y + rh, cz], [x0, y + rh, cz], [0, 0, 1, 1], gableCol);
+    B.plain.quad([x1, y, z1], [x1, y, z0], [x1, y + rh, cz], [x1, y + rh, cz], [0, 0, 1, 1], gableCol);
+  } else {                                         // ridge runs along z, eaves at x0 / x1
+    B.plain.quad([x0, y, z0], [x0, y, z1], [cx, y + rh, z1], [cx, y + rh, z0], [0, 0, 1, 1], roofCol);
+    B.plain.quad([x1, y, z1], [x1, y, z0], [cx, y + rh, z0], [cx, y + rh, z1], [0, 0, 1, 1], roofCol);
+    B.plain.quad([x0, y, z1], [x1, y, z1], [cx, y + rh, z1], [cx, y + rh, z1], [0, 0, 1, 1], gableCol);
+    B.plain.quad([x1, y, z0], [x0, y, z0], [cx, y + rh, z0], [cx, y + rh, z0], [0, 0, 1, 1], gableCol);
+  }
+}
+// Pyramid hip roof: apex over the centre, one triangle per eave edge.
+function addPyramidRoof(B, x0, z0, x1, z1, y, roofCol) {
+  const cx = (x0 + x1) / 2, cz = (z0 + z1) / 2;
+  const rh = clamp(Math.min(x1 - x0, z1 - z0) * 0.5, 1.6, 5);
+  const ap = [cx, y + rh, cz];
+  B.plain.quad([x1, y, z0], [x0, y, z0], ap, ap, [0, 0, 1, 1], roofCol);   // -z edge
+  B.plain.quad([x0, y, z1], [x1, y, z1], ap, ap, [0, 0, 1, 1], roofCol);   // +z edge
+  B.plain.quad([x0, y, z0], [x0, y, z1], ap, ap, [0, 0, 1, 1], roofCol);   // -x edge
+  B.plain.quad([x1, y, z1], [x1, y, z0], ap, ap, [0, 0, 1, 1], roofCol);   // +x edge
+}
+// Sawtooth shed roof: 3–5 asymmetric prisms across x (vertical riser + slope + side fills).
+function addSawtoothRoof(B, x0, z0, x1, z1, y, roofCol, rng) {
+  const n = 3 + (rng() * 3 | 0), bw = (x1 - x0) / n;
+  const dark = _c.copy(roofCol).multiplyScalar(0.72).clone();
+  for (let i = 0; i < n; i++) {
+    const xa = x0 + i * bw, xb = xa + bw, sh = 1.0 + rng() * 1.6, yt = y + sh;
+    B.plain.quad([xa, y, z0], [xa, y, z1], [xa, yt, z1], [xa, yt, z0], [0, 0, 1, 1], dark);          // vertical riser (-x)
+    B.plain.quad([xb, y, z0], [xa, yt, z0], [xa, yt, z1], [xb, y, z1], [0, 0, 1, 1], roofCol);       // slope down to next
+    B.plain.quad([xa, y, z0], [xa, yt, z0], [xb, y, z0], [xb, y, z0], [0, 0, 1, 1], dark);           // side fill z0
+    B.plain.quad([xb, y, z1], [xa, yt, z1], [xa, y, z1], [xa, y, z1], [0, 0, 1, 1], dark);           // side fill z1
+  }
+}
+
+/* ---- Districts (Phase B): per-style ornaments — all batched, deterministic ----
+   Small helpers hung on the finished building box, keyed to the same tint/rng so
+   each neighbourhood reads as its own architecture. Offsets are >=0.06 off the
+   facade so nothing z-fights the window atlas. */
+const AWNING_COLS = [0x8a4033, 0x7a5a2f, 0x3f5e46, 0x35526b, 0x6b4a2f, 0x86502f].map(srgb);
+const MURAL_COLS = [0x6a6f5c, 0x5c5750, 0x6e5a4a, 0x4e5a5c, 0x746a54, 0x5a5060].map(srgb);
+const BRICK_COL = srgb(0x5a3428), BRICK_DK = srgb(0x47281f);
+// side 0:+x 1:-x 2:+z 3:-z. faceMap(u,o) → world [x,z]: u runs along the face, o outward.
+function faceMap(side, x0, x1, z0, z1) {
+  if (side === 0) return (u, o) => [x1 + o, u];
+  if (side === 1) return (u, o) => [x0 - o, u];
+  if (side === 2) return (u, o) => [u, z1 + o];
+  return (u, o) => [u, z0 - o];
+}
+function faceSpan(side, x0, x1, z0, z1) {   // [u0,u1] range along a face
+  return (side === 0 || side === 1) ? [z0, z1] : [x0, x1];
+}
+// Flat panel flush against a face, wound so its normal faces outward. u = centre along
+// the face, pw = half-width, yb..yt vertical, o = standoff.
+function facePanel(batch, side, x0, x1, z0, z1, u, pw, yb, yt, o, col, colB) {
+  let a, b, c2, d;
+  if (side === 0) { const px = x1 + o; a = [px, yb, u + pw]; b = [px, yb, u - pw]; c2 = [px, yt, u - pw]; d = [px, yt, u + pw]; }
+  else if (side === 1) { const px = x0 - o; a = [px, yb, u - pw]; b = [px, yb, u + pw]; c2 = [px, yt, u + pw]; d = [px, yt, u - pw]; }
+  else if (side === 2) { const pz = z1 + o; a = [u - pw, yb, pz]; b = [u + pw, yb, pz]; c2 = [u + pw, yt, pz]; d = [u - pw, yt, pz]; }
+  else { const pz = z0 - o; a = [u + pw, yb, pz]; b = [u - pw, yb, pz]; c2 = [u - pw, yt, pz]; d = [u + pw, yt, pz]; }
+  batch.quad(a, b, c2, d, [0, 0, 1, 1], col, colB || col);
+}
+// A tilted awning slab (thin centred box) projecting from a face; robust to winding.
+function faceAwning(B, side, x0, x1, z0, z1, u, pw, yTop, proj, col, rng) {
+  const drop = 0.5 + rng() * 0.4, tilt = 0.28 + rng() * 0.12;
+  const map = faceMap(side, x0, x1, z0, z1);
+  const [mx, mz] = map(u, proj / 2);                               // slab centre, half-projected
+  const yc = yTop - drop / 2;
+  const dep = proj * 1.12, th = 0.09;
+  if (side === 0) B.plain.addGeo(tplBoxC, compose(mx, yc, mz, dep, th, 2 * pw, 0, 0, tilt), col, 0.05, rng);
+  else if (side === 1) B.plain.addGeo(tplBoxC, compose(mx, yc, mz, dep, th, 2 * pw, 0, 0, -tilt), col, 0.05, rng);
+  else if (side === 2) B.plain.addGeo(tplBoxC, compose(mx, yc, mz, 2 * pw, th, dep, -tilt, 0, 0), col, 0.05, rng);
+  else B.plain.addGeo(tplBoxC, compose(mx, yc, mz, 2 * pw, th, dep, tilt, 0, 0), col, 0.05, rng);
+  // two thin support rods dropping from the outer edge to storefront height
+  const rc = _c.copy(COL.wood).multiplyScalar(0.7).clone();
+  for (const s of [-1, 1]) {
+    const [rx, rz] = map(u + s * pw * 0.85, proj * 0.95);
+    B.plain.addGeo(tplCyl, compose(rx, 0, rz, 0.05, yTop - drop, 0.05), rc, 0, rng);
+  }
+}
+
+// oldtown: awnings + shutters + a gable chimney.
+function ornOldtown(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, roofType, bay) {
+  if (rng() < 0.5) {                                                // storefront awnings
+    let sides = [0, 1, 2, 3].filter(() => rng() < 0.4);
+    if (!sides.length) sides = [(rng() * 4) | 0];
+    for (const s of sides.slice(0, 2)) {
+      const [u0, u1] = faceSpan(s, x0, x1, z0, z1), fl = u1 - u0;
+      if (fl < 3) continue;
+      const pw = Math.min(1.6 + rng() * 1.2, fl / 2 - 0.6);
+      const u = lerp(u0 + pw + 0.4, u1 - pw - 0.4, rng());
+      const col = _c.copy(AWNING_COLS[(rng() * AWNING_COLS.length) | 0]).multiplyScalar(0.8 + rng() * 0.3).clone();
+      faceAwning(B, s, x0, x1, z0, z1, u, pw, 2.9 + rng() * 0.5, 1.0 + rng() * 0.5, col, rng);
+    }
+  }
+  if (rng() < 0.4) {                                                // window shutters on a couple of bays
+    const dark = _c.copy(BRICK_DK).lerp(COL.wood, 0.5).multiplyScalar(0.8).clone();
+    const sides = [0, 1, 2, 3].filter(() => rng() < 0.45);
+    for (const s of sides.slice(0, 2)) {
+      const [u0, u1] = faceSpan(s, x0, x1, z0, z1), fl = u1 - u0;
+      const nb = Math.max(1, Math.round(fl / bay));
+      const nfl = Math.max(1, Math.floor(h / 3.2));
+      for (let bi = 0; bi < nb; bi++) {
+        if (rng() < 0.5) continue;
+        const uc = u0 + (bi + 0.5) * fl / nb, half = Math.min(0.9, fl / nb * 0.32);
+        const fi = 1 + ((rng() * Math.max(1, nfl - 1)) | 0), yb = fi * 3.2 - 1.3;
+        if (yb + 1.6 > h) continue;
+        for (const sgn of [-1, 1])
+          facePanel(B.plain, s, x0, x1, z0, z1, uc + sgn * (half + 0.3), 0.28, yb, yb + 1.6, 0.07, dark);
+      }
+    }
+  }
+  if ((roofType === 'gable' || roofType === 'hip') && rng() < 0.6) {  // brick chimney on the ridge
+    const chx = cx + (rng() - 0.5) * w * 0.4, chz = cz + (rng() - 0.5) * d * 0.4;
+    const ch = 1.4 + rng() * 1.4;
+    B.plain.addGeo(tplBox, compose(chx, h, chz, 0.7, ch, 0.7), BRICK_COL, 0.12, rng);
+    B.plain.addGeo(tplBox, compose(chx, h + ch, chz, 0.9, 0.22, 0.9), BRICK_DK, 0.1, rng);
+  }
+}
+
+// blocks: balcony grids + an occasional faded mural.
+function ornBlocks(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, roofType) {
+  if (rng() < 0.55 && h >= 8) {                                    // balcony grids
+    const nSides = 1 + (rng() < 0.4 ? 1 : 0);
+    const chosen = [0, 1, 2, 3].sort(() => rng() - 0.5).slice(0, nSides);
+    const rail = _c.copy(COL.wire).lerp(COL.rock, 0.4).clone();
+    const slab = _c.copy(COL.sidewalk).multiplyScalar(0.7).clone();
+    const flr = 3.2, nfl = Math.max(1, Math.floor(h / flr) - 1);
+    for (const s of chosen) {
+      const [u0, u1] = faceSpan(s, x0, x1, z0, z1), fl = u1 - u0;
+      const map = faceMap(s, x0, x1, z0, z1);
+      const nc = 1 + (rng() < 0.5 ? 1 : 0), bw = Math.min(2.4, fl / (nc + 1));
+      for (let ci = 0; ci < nc; ci++) {
+        const uc = lerp(u0 + bw, u1 - bw, nc === 1 ? 0.35 + rng() * 0.3 : ci / Math.max(1, nc - 1));
+        const [mx, mz] = map(uc, 0.35);
+        for (let f = 1; f <= nfl; f++) {
+          const yb = f * flr;
+          B.plain.addGeo(tplBoxC, compose(mx, yb, mz, (s < 2 ? 0.7 : bw), 0.14, (s < 2 ? bw : 0.7)), slab, 0.05, rng);
+          B.plain.addGeo(tplBoxC, compose(mx, yb + 0.5, mz, (s < 2 ? 0.66 : bw), 0.5, (s < 2 ? bw : 0.66)), rail, 0.05, rng);  // rail block (open feel via thin)
+          const [rx, rz] = map(uc, 0.7);
+          B.plain.addGeo(tplBox, compose(rx, yb, rz, (s < 2 ? 0.06 : bw), 0.5, (s < 2 ? bw : 0.06)), rail, 0, rng);            // outer rail bar
+        }
+      }
+    }
+  }
+  if (rng() < 0.15) {                                              // faded 2-tone mural
+    const s = (rng() * 4) | 0, [u0, u1] = faceSpan(s, x0, x1, z0, z1), fl = u1 - u0;
+    if (fl > 5 && h > 10) {
+      const mw = Math.min(fl * 0.5, 4 + rng() * 3), uc = lerp(u0 + mw / 2 + 1, u1 - mw / 2 - 1, rng());
+      const yb = 3 + rng() * (h - 9), mh = 3 + rng() * 3;
+      const a = _c.copy(MURAL_COLS[(rng() * MURAL_COLS.length) | 0]).multiplyScalar(0.9).clone();
+      const b = _c.copy(MURAL_COLS[(rng() * MURAL_COLS.length) | 0]).multiplyScalar(0.9).clone();
+      facePanel(B.plain, s, x0, x1, z0, z1, uc, mw / 2, yb, yb + mh, 0.06, a);
+      facePanel(B.plain, s, x0, x1, z0, z1, uc, mw / 2, yb, yb + mh * 0.42, 0.065, b);
+    }
+  }
+}
+
+// glass: rooftop antenna/mast cluster + occasional vertical fin strips.
+function ornGlass(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, top) {
+  if (rng() < 0.7) {                                               // mast cluster on the top tier
+    const tx0 = top.x0, tz0 = top.z0, tx1 = top.x1, tz1 = top.z1, ty = top.y;
+    const n = 2 + (rng() * 3 | 0);
+    let tallX = cx, tallZ = cz, tallH = 0;
+    for (let k = 0; k < n; k++) {
+      const mx = lerp(tx0 + 0.8, tx1 - 0.8, rng()), mz = lerp(tz0 + 0.8, tz1 - 0.8, rng());
+      const mh = 2.5 + rng() * 5;
+      B.plain.addGeo(tplCyl, compose(mx, ty, mz, 0.06 + rng() * 0.04, mh, 0.06 + rng() * 0.04), COL.wire, 0, rng);
+      if (mh > tallH) { tallH = mh; tallX = mx; tallZ = mz; }
+    }
+    B.lamp.addGeo(tplBlob, compose(tallX, ty + tallH, tallZ, 0.16, 0.16, 0.16), srgb(0xff5a4a), 0, rng);   // blinking-style beacon
+  }
+  if (rng() < 0.3) {                                               // vertical fin strips along one face
+    const s = (rng() * 4) | 0, [u0, u1] = faceSpan(s, x0, x1, z0, z1), fl = u1 - u0;
+    const map = faceMap(s, x0, x1, z0, z1);
+    const nf = 3 + (rng() * 4 | 0), fc = _c.copy(COL.rock).multiplyScalar(0.9).clone();
+    for (let k = 0; k < nf; k++) {
+      const uc = lerp(u0 + 0.6, u1 - 0.6, nf === 1 ? 0.5 : k / (nf - 1));
+      const [mx, mz] = map(uc, 0.2);
+      B.plain.addGeo(tplBox, compose(mx, 0.5, mz, (s < 2 ? 0.4 : 0.14), h - 1, (s < 2 ? 0.14 : 0.4)), fc, 0.04, rng);
+    }
+  }
+}
+
+// works: brick chimney stack + a rusty silo with pipe runs to the shed.
+function ornWorks(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h) {
+  if (rng() < 0.5) {                                               // tall brick chimney stack
+    const chx = lerp(x0 + 1.5, x1 - 1.5, rng()), chz = lerp(z0 + 1.5, z1 - 1.5, rng());
+    const ch = h * 1.5, cw = 0.8 + rng() * 0.5;
+    B.plain.addGeo(tplBox, compose(chx, 0, chz, cw, ch, cw), BRICK_COL, 0.14, rng);
+    B.plain.addGeo(tplBox, compose(chx, ch, chz, cw + 0.2, 0.3, cw + 0.2), BRICK_DK, 0.1, rng);
+    colData.trunks.push({ x: chx, z: chz, r: cw * 0.75, h: ch });
+  }
+  if (rng() < 0.35) {                                              // silo beside the shed
+    const s = (rng() * 4) | 0, map = faceMap(s, x0, x1, z0, z1), [u0, u1] = faceSpan(s, x0, x1, z0, z1);
+    const uc = lerp(u0 + 3, u1 - 3, rng()), r = 2 + rng();
+    const [sx, sz] = map(uc, r + 0.6), sh = 8 + rng() * 4;
+    const rust = _c.copy(COL.rust).multiplyScalar(0.85 + rng() * 0.3).clone();
+    B.plain.addGeo(tplCyl, compose(sx, 0, sz, r, sh, r), rust, 0.12, rng);
+    B.plain.addGeo(tplBlob, compose(sx, sh, sz, r, r * 0.6, r), _c.copy(rust).multiplyScalar(0.85).clone(), 0.1, rng);  // domed cap
+    colData.trunks.push({ x: sx, z: sz, r: r + 0.2, h: sh });
+    // horizontal pipe runs between shed wall and silo
+    const [wx, wz] = map(uc, 0.2);
+    for (let p = 0; p < 2; p++) {
+      const py = 2.5 + p * 2 + rng();
+      B.plain.addGeo(tplCyl, segMat(wx, py, wz, sx, py, sz, 0.14 + rng() * 0.06), COL.rust, 0.1, rng);
+    }
+  }
+}
+
+// garden: dress a yard gap between detached houses — a low weathered-wood fence around
+// its perimeter, a small shed (~25%) and a hanging laundry line (~30%). Yards live inside
+// the INSET band so fences never reach the sidewalk or the street trees.
+const FENCE_COL = srgb(0x6b5a44);
+function addGardenYard(B, colData, rng, yx0, yz0, yx1, yz1, houseWall) {
+  const yw = yx1 - yx0, yd = yz1 - yz0;
+  if (yw < 1.4 || yd < 1.4) return;
+  const post = _c.copy(FENCE_COL).multiplyScalar(0.8 + rng() * 0.35).clone();
+  const railY = 0.55 + rng() * 0.25;
+  const runFence = (ax, az, bx, bz) => {
+    const L = Math.hypot(bx - ax, bz - az), n = Math.max(2, Math.round(L / 1.5));
+    for (let k = 0; k <= n; k++) {
+      const t = k / n, px = lerp(ax, bx, t), pz = lerp(az, bz, t);
+      B.plain.addGeo(tplBox, compose(px, 0, pz, 0.09, 0.9 + rng() * 0.2, 0.09), post, 0.1, rng);
+    }
+    for (const ry of [railY, railY * 0.5]) {                       // 1–2 rails
+      if (ry < railY * 0.5 && rng() < 0.4) continue;
+      B.plain.addGeo(tplBoxC, segRailBox(ax, ry, az, bx, ry, bz), post, 0.08, rng);
+    }
+  };
+  runFence(yx0, yz0, yx1, yz0); runFence(yx1, yz0, yx1, yz1);
+  runFence(yx1, yz1, yx0, yz1); runFence(yx0, yz1, yx0, yz0);
+  const cx = (yx0 + yx1) / 2, cz = (yz0 + yz1) / 2;
+  if (rng() < 0.25 && yw > 2.6 && yd > 2.6) {                      // garden shed
+    const sw = 1.6 + rng() * 0.6, sh = 1.8 + rng() * 0.5;
+    const wall = _c.copy(COL.wood).multiplyScalar(1.1).clone();
+    B.plain.addGeo(tplBox, compose(cx, 0, cz, sw, sh, sw), wall, 0.1, rng);
+    addPyramidRoof(B, cx - sw / 2, cz - sw / 2, cx + sw / 2, cz + sw / 2, sh, srgb(0x4e5a52));
+    colData.solids.push({ x0: cx - sw / 2, z0: cz - sw / 2, x1: cx + sw / 2, z1: cz + sw / 2, h: sh, vine: false });
+  } else if (rng() < 0.3 && houseWall) {                          // laundry line: house wall → a pole
+    const px = clamp(cx + (rng() - 0.5) * yw * 0.4, yx0 + 0.4, yx1 - 0.4);
+    const pz = clamp(cz + (rng() - 0.5) * yd * 0.4, yz0 + 0.4, yz1 - 0.4);
+    const ly = 2.0 + rng() * 0.4;
+    B.plain.addGeo(tplCyl, compose(px, 0, pz, 0.05, ly + 0.2, 0.05), COL.wood, 0, rng);
+    const ax = houseWall[0], az = houseWall[1];
+    B.plain.addGeo(tplCyl, segMat(ax, ly, az, px, ly, pz, 0.02), COL.wire, 0, rng);
+    const nCloth = 2 + (rng() * 2 | 0);
+    for (let k = 0; k < nCloth; k++) {
+      const t = 0.25 + rng() * 0.5, hx = lerp(ax, px, t), hz = lerp(az, pz, t);
+      const cw = 0.4 + rng() * 0.3, ch = 0.5 + rng() * 0.4;
+      const col = _c.copy(AWNING_COLS[(rng() * AWNING_COLS.length) | 0]).lerp(srgb(0xffffff), 0.4).clone();
+      B.plain.quad([hx - cw / 2, ly - ch, hz], [hx + cw / 2, ly - ch, hz], [hx + cw / 2, ly, hz], [hx - cw / 2, ly, hz], [0, 0, 1, 1], col);
+    }
+  }
+}
+// A thin horizontal rail as a centred box spanning a→b (for fence rails).
+function segRailBox(ax, ay, az, bx, by, bz) {
+  const dx = bx - ax, dz = bz - az, L = Math.hypot(dx, dz) || 1e-4, ang = Math.atan2(dz, dx);
+  return compose((ax + bx) / 2, ay, (az + bz) / 2, L, 0.08, 0.06, 0, -ang, 0);
+}
 
 function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   opts = opts || {};
+  const style = opts.style || CUR_STYLE;
+  const cfg = STYLE_CFG[style] || STYLE_CFG.blocks;
   const x0 = cx - w / 2, x1 = cx + w / 2, z0 = cz - d / 2, z1 = cz + d / 2;
-  const tint = FACADE_TINTS[(rng() * FACADE_TINTS.length) | 0].clone().multiplyScalar(0.82 + rng() * 0.26);
+  const pool = STYLE_TINTS[style] || FACADE_TINTS;
+  const tint = pool[(rng() * pool.length) | 0].clone().multiplyScalar(0.82 + rng() * 0.26);
   const mossy = _c.copy(tint).lerp(COL.moss, 0.74).multiplyScalar(0.66).clone();  // stronger ground-level moss creep
-  // per-building window rhythm: bay width (~3 m) & storey height (~3.4 m) vary so facades differ
-  const bay = 2.9 + rng() * 1.4, flr = 3.0 + rng() * 0.9;
-  const uc = Math.max(1, Math.round(w / bay)), ucd = Math.max(1, Math.round(d / bay));
-  const vc = Math.max(1, Math.round(h / flr));
+  // per-building window rhythm from the district style (glass tight, works sparse/big)
+  const bay = cfg.bay[0] + rng() * cfg.bay[1], flr = cfg.flr[0] + rng() * cfg.flr[1];
   const uo = (rng() * BLD_CELLS) | 0, vo = (rng() * BLD_CELLS) | 0;
-  // 4 window walls (CCW seen from outside)
-  B.bld.quad([x1, 0, z1], [x1, 0, z0], [x1, h, z0], [x1, h, z1], [uo, vo, uo + ucd, vo + vc], tint, mossy);
-  B.bld.quad([x0, 0, z0], [x0, 0, z1], [x0, h, z1], [x0, h, z0], [uo, vo, uo + ucd, vo + vc], tint, mossy);
-  B.bld.quad([x0, 0, z1], [x1, 0, z1], [x1, h, z1], [x0, h, z1], [uo, vo, uo + uc, vo + vc], tint, mossy);
-  B.bld.quad([x1, 0, z0], [x0, 0, z0], [x0, h, z0], [x1, h, z0], [uo, vo, uo + uc, vo + vc], tint, mossy);
-  // roof
-  const roofCol = _c.copy(COL.roof).multiplyScalar(0.85 + rng() * 0.3).clone();
-  B.plain.quad([x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], [0, 0, 1, 1], roofCol);
-  // vines on some faces
-  const hasVines = opts.vines !== undefined ? opts.vines : rng() < 0.92;
+  const roofCol = cfg.rc != null ? srgb(cfg.rc).multiplyScalar(0.8 + rng() * 0.3)
+    : _c.copy(COL.roof).multiplyScalar(0.85 + rng() * 0.3).clone();
+  // Tiered towers: glass always; 20% of any tall building elsewhere. Boxes stack with
+  // shrinking setbacks, each tier a ground-up solid + parapet.
+  const tallTier = h >= 18 && rng() < 0.20;
+  const tiered = !opts.noTier && (cfg.tiered || tallTier);
+  // roof kind (tiers are boxes → flat top); garden picks gable vs pyramid ~50/50.
+  let roofType = tiered ? 'flat' : cfg.roof;
+  if (roofType === 'hip' && rng() < 0.5) roofType = 'gable';
+  const flatRoof = roofType === 'flat';
+  let topX0 = x0, topZ0 = z0, topX1 = x1, topZ1 = z1, topY = h;   // top-tier rect (for glass masts)
+  let tier1Y = h;                                                 // first-tier top (ornaments cling below setbacks)
+
+  // Ruin variant (~12% of non-tiered buildings, any style except glass): a reduced,
+  // roofless shell with a ragged broken parapet, one exposed interior floor slab, heavy
+  // vines and rubble at a corner. Self-contained → pushes its own solid + minimap rect.
+  if (!opts.noTier && !opts.noRuin && !tiered && style !== 'glass' && rng() < 0.12) {
+    const rh = h * (0.4 + rng() * 0.3);
+    bldWalls(B, x0, z0, x1, z1, 0, rh, bay, flr, tint, mossy, 0, uo, vo);
+    const fy = rh - 3;                                             // exposed interior floor slab
+    if (fy > 1.5) B.plain.quad([x0, fy, z1], [x1, fy, z1], [x1, fy, z0], [x0, fy, z0], [0, 0, 1, 1], _c.copy(COL.rock).multiplyScalar(0.45).clone());
+    const pc = _c.copy(tint).multiplyScalar(0.7).clone();          // ragged parapet: short broken segments
+    for (const s of [0, 1, 2, 3]) {
+      const [u0, u1] = faceSpan(s, x0, x1, z0, z1), map = faceMap(s, x0, x1, z0, z1), fl = u1 - u0;
+      const nseg = Math.max(2, Math.round(fl / 1.6));
+      for (let k = 0; k < nseg; k++) {
+        if (rng() < 0.32) continue;                                // some segments missing
+        const uc = u0 + (k + 0.5) * fl / nseg, [mx, mz] = map(uc, -0.15);
+        const sh = 0.3 + rng() * 0.9;
+        B.plain.addGeo(tplBox, compose(mx, rh, mz, (s < 2 ? 0.3 : fl / nseg * 0.9), sh, (s < 2 ? fl / nseg * 0.9 : 0.3)), pc, 0.08, rng);
+      }
+    }
+    for (const s of [0, 1, 2, 3]) addWallVines(B, rng, x0, z0, x1, z1, rh, s);   // heavy vines all sides
+    const rcx = rng() < 0.5 ? x0 : x1, rcz = rng() < 0.5 ? z0 : z1;              // rubble at one corner
+    for (let k = 0; k < 4 + (rng() * 3 | 0); k++) {
+      const rr = 0.6 + rng() * 1.3, jx = (rng() - 0.5) * 4, jz = (rng() - 0.5) * 4;
+      B.plain.addGeo(tplRock, compose(rcx + jx, rr * 0.25, rcz + jz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+    }
+    colData.trunks.push({ x: rcx, z: rcz, r: 1.4, h: 1.2 });
+    colData.solids.push({ x0, z0, x1, z1, h: rh, vine: true });
+    mini.rects.push([x0, z0, w, d, rh]);
+    return;
+  }
+
+  if (tiered) {
+    let bx0 = x0, bz0 = z0, bx1 = x1, bz1 = z1, y0 = 0, floors = 0, hLeft = h;
+    const nT = 2 + (rng() * 2 | 0);
+    for (let ti = 0; ti < nT; ti++) {
+      const th = (ti === nT - 1) ? hLeft : hLeft * (0.42 + rng() * 0.16);
+      hLeft -= th;
+      floors += bldWalls(B, bx0, bz0, bx1, bz1, y0, th, bay, flr, tint, mossy, floors, uo, vo);
+      const tw = bx1 - bx0, td = bz1 - bz0;
+      const ph = 0.35 + rng() * 0.4, pc = _c.copy(roofCol).multiplyScalar(0.8).clone();
+      B.plain.addGeo(tplBox, compose(cx, y0 + th, bz1 - 0.15, tw, ph, 0.3), pc, 0.05, rng);
+      B.plain.addGeo(tplBox, compose(cx, y0 + th, bz0 + 0.15, tw, ph, 0.3), pc, 0.05, rng);
+      B.plain.addGeo(tplBox, compose(bx1 - 0.15, y0 + th, cz, 0.3, ph, td), pc, 0.05, rng);
+      B.plain.addGeo(tplBox, compose(bx0 + 0.15, y0 + th, cz, 0.3, ph, td), pc, 0.05, rng);
+      colData.solids.push({ x0: bx0, z0: bz0, x1: bx1, z1: bz1, h: y0 + th, vine: ti === 0 });
+      if (ti === 0) tier1Y = y0 + th;
+      if (ti === nT - 1) { B.plain.quad([bx0, y0 + th, bz1], [bx1, y0 + th, bz1], [bx1, y0 + th, bz0], [bx0, y0 + th, bz0], [0, 0, 1, 1], roofCol); topX0 = bx0; topZ0 = bz0; topX1 = bx1; topZ1 = bz1; topY = y0 + th; }
+      y0 += th;
+      const shr = 0.15 + rng() * 0.15, nw = tw * (1 - shr), nd = td * (1 - shr);
+      bx0 = cx - nw / 2; bx1 = cx + nw / 2; bz0 = cz - nd / 2; bz1 = cz + nd / 2;
+    }
+  } else {
+    bldWalls(B, x0, z0, x1, z1, 0, h, bay, flr, tint, mossy, 0, uo, vo);
+    if (roofType === 'gable') { addGableRoof(B, x0, z0, x1, z1, h, roofCol, tint); }
+    else if (roofType === 'hip') { addPyramidRoof(B, x0, z0, x1, z1, h, roofCol); }
+    else if (roofType === 'saw') { B.plain.quad([x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], [0, 0, 1, 1], roofCol); addSawtoothRoof(B, x0, z0, x1, z1, h, roofCol, rng); }
+    else { B.plain.quad([x0, h, z1], [x1, h, z1], [x1, h, z0], [x0, h, z0], [0, 0, 1, 1], roofCol); }
+  }
+  // vines on some faces (weighted per district: heavy oldtown/works/garden, light glass/blocks)
+  const hasVines = opts.vines !== undefined ? opts.vines : rng() < clamp(0.92 * cfg.vine, 0, 0.98);
   if (hasVines) {
     const sides = (opts.allSides || rng() < 0.4) ? [0, 1, 2, 3] : [0, 1, 2, 3].filter(() => rng() < 0.85);
     if (sides.length === 0) sides.push((rng() * 4) | 0);
     for (const s of sides) addWallVines(B, rng, x0, z0, x1, z1, h, s);
   }
-  // parapet
-  const ph = 0.35 + rng() * 0.4, pc = _c.copy(roofCol).multiplyScalar(0.8).clone();
-  B.plain.addGeo(tplBox, compose(cx, h, z1 - 0.15, w, ph, 0.3), pc, 0.05, rng);
-  B.plain.addGeo(tplBox, compose(cx, h, z0 + 0.15, w, ph, 0.3), pc, 0.05, rng);
-  B.plain.addGeo(tplBox, compose(x1 - 0.15, h, cz, 0.3, ph, d), pc, 0.05, rng);
-  B.plain.addGeo(tplBox, compose(x0 + 0.15, h, cz, 0.3, ph, d), pc, 0.05, rng);
-  // roof clutter: water tank, AC units, antenna
-  if (rng() < 0.4 && w > 10) {
-    const tx = lerp(x0 + 2, x1 - 2, rng()), tz = lerp(z0 + 2, z1 - 2, rng());
-    B.plain.addGeo(tplCyl, compose(tx, h, tz, 1.1, 2.1, 1.1), COL.rust, 0.15, rng);
-    B.plain.addGeo(tplCyl, compose(tx, h + 2.1, tz, 1.15, 0.3, 1.15), COL.deadwood, 0.1, rng);
-  }
-  if (rng() < 0.55) {
-    const n = 1 + (rng() * 3 | 0);
-    for (let k = 0; k < n; k++)
-      B.plain.addGeo(tplBox, compose(lerp(x0 + 1.4, x1 - 1.4, rng()), h, lerp(z0 + 1.4, z1 - 1.4, rng()), 1.1, 0.55, 0.85, 0, rng() * 7, 0), COL.rock, 0.15, rng);
-  }
-  if (rng() < 0.45) {
-    const ax2 = lerp(x0 + 1.5, x1 - 1.5, rng()), az2 = lerp(z0 + 1.5, z1 - 1.5, rng());
-    const ah = 2.5 + rng() * 4;
-    B.plain.addGeo(tplCyl, compose(ax2, h, az2, 0.05, ah, 0.05), COL.wire, 0, rng);
-    B.plain.addGeo(tplBox, compose(ax2, h + ah * 0.75, az2, 0.7, 0.05, 0.05, 0, rng() * 7, 0), COL.wire, 0, rng);
+  // Flat-roof-only dressing: parapet + roof clutter + rooftop garden + roofline spill.
+  // Pitched / sawtooth / pyramid / tiered roofs skip these so nothing floats mid-air.
+  const bareRoof = flatRoof && !tiered;
+  if (bareRoof) {
+    // parapet
+    const ph = 0.35 + rng() * 0.4, pc = _c.copy(roofCol).multiplyScalar(0.8).clone();
+    B.plain.addGeo(tplBox, compose(cx, h, z1 - 0.15, w, ph, 0.3), pc, 0.05, rng);
+    B.plain.addGeo(tplBox, compose(cx, h, z0 + 0.15, w, ph, 0.3), pc, 0.05, rng);
+    B.plain.addGeo(tplBox, compose(x1 - 0.15, h, cz, 0.3, ph, d), pc, 0.05, rng);
+    B.plain.addGeo(tplBox, compose(x0 + 0.15, h, cz, 0.3, ph, d), pc, 0.05, rng);
+    // roof clutter: water tank, AC units, antenna
+    if (rng() < 0.4 && w > 10) {
+      const tx = lerp(x0 + 2, x1 - 2, rng()), tz = lerp(z0 + 2, z1 - 2, rng());
+      B.plain.addGeo(tplCyl, compose(tx, h, tz, 1.1, 2.1, 1.1), COL.rust, 0.15, rng);
+      B.plain.addGeo(tplCyl, compose(tx, h + 2.1, tz, 1.15, 0.3, 1.15), COL.deadwood, 0.1, rng);
+    }
+    if (rng() < 0.55) {
+      const n = 1 + (rng() * 3 | 0);
+      for (let k = 0; k < n; k++)
+        B.plain.addGeo(tplBox, compose(lerp(x0 + 1.4, x1 - 1.4, rng()), h, lerp(z0 + 1.4, z1 - 1.4, rng()), 1.1, 0.55, 0.85, 0, rng() * 7, 0), COL.rock, 0.15, rng);
+    }
+    if (rng() < 0.45) {
+      const ax2 = lerp(x0 + 1.5, x1 - 1.5, rng()), az2 = lerp(z0 + 1.5, z1 - 1.5, rng());
+      const ah = 2.5 + rng() * 4;
+      B.plain.addGeo(tplCyl, compose(ax2, h, az2, 0.05, ah, 0.05), COL.wire, 0, rng);
+      B.plain.addGeo(tplBox, compose(ax2, h + ah * 0.75, az2, 0.7, 0.05, 0.05, 0, rng() * 7, 0), COL.wire, 0, rng);
+    }
   }
   // faded shop sign band at storefront height
   if (h < 22 && rng() < 0.4) {
@@ -894,7 +1464,7 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
     else { const pz = cz + mid * d; B.plain.quad([x0 - o, sy, pz - sw / 2], [x0 - o, sy, pz + sw / 2], [x0 - o, sy + sh, pz + sw / 2], [x0 - o, sy + sh, pz - sw / 2], [0, 0, 1, 1], sc); }
   }
   // rooftop garden
-  if (opts.garden !== false && rng() < 0.55 && h < 40) {
+  if (bareRoof && opts.garden !== false && rng() < 0.55 && h < 40) {
     const nG = 1 + (rng() * 3 | 0);
     for (let k = 0; k < nG; k++) {
       const gr = 1.4 + rng() * 2.4;
@@ -905,7 +1475,7 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   // Spiral limb wrapping ~1 in 4 towers (a climb/walk route toward the Weave), and an
   // occasional Crown Nest on a tall roof (L3, y 32–40).
   // green roofline: on ~40% of buildings, small leaf blobs spill over the parapet corners
-  if (rng() < 0.4) {
+  if (bareRoof && rng() < 0.4) {
     const corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]];
     const nBlob = 1 + (rng() * 3 | 0);
     for (let k = 0; k < nBlob; k++) {
@@ -918,7 +1488,23 @@ function addBuilding(B, colData, mini, rng, cx, cz, w, d, h, opts) {
   }
   if (h > 20 && rng() < 0.25) addSpiralLimb(B, colData, rng, cx, cz, w, d, h);
   if (h >= 30 && h <= 46 && rng() < 0.3) addCrownNest(B, colData, rng, cx, cz, h, 2.5 + rng() * 1.3);
-  colData.solids.push({ x0, z0, x1, z1, h, vine: hasVines });
+  // Districts (Phase B): per-style ornaments hung on the finished box.
+  const wallTop = tiered ? tier1Y : h;   // ornaments cling to the base tier (below any setback)
+  if (style === 'oldtown') ornOldtown(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h, roofType, bay);
+  else if (style === 'blocks') ornBlocks(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, wallTop, roofType);
+  else if (style === 'glass') {
+    ornGlass(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, wallTop, { x0: topX0, z0: topZ0, x1: topX1, z1: topZ1, y: topY });
+    // Night glow: a few extra lit-window quads (matLamp glows warm at night, dark by day)
+    // so glass towers sparkle after dark without touching the shared window atlas.
+    const nLit = 2 + (rng() * 4 | 0);
+    for (let k = 0; k < nLit; k++) {
+      const s = (rng() * 4) | 0, [u0, u1] = faceSpan(s, x0, x1, z0, z1);
+      const uc = lerp(u0 + 1, u1 - 1, rng()), yb = 2 + rng() * (wallTop - 4);
+      facePanel(B.lamp, s, x0, x1, z0, z1, uc, 0.5 + rng() * 0.5, yb, yb + 1 + rng() * 0.8, 0.09, srgb(0x33302a), null);
+    }
+  }
+  else if (style === 'works') ornWorks(B, colData, rng, x0, z0, x1, z1, cx, cz, w, d, h);
+  if (!tiered) colData.solids.push({ x0, z0, x1, z1, h, vine: hasVines });  // tiered pushed a solid per tier
   mini.rects.push([x0, z0, w, d, h]);
 }
 
@@ -1169,7 +1755,7 @@ function addColossus(B, colData, mini, rng, ox, oz) {
 function addFallen(B, colData, mini, rng, ox, oz) {
   const h = 28 + rng() * 8;
   const sx = ox + 24 + rng() * 6, sz = oz + 40 + rng() * 6, w = 12 + rng() * 3, d = 12 + rng() * 3;
-  addBuilding(B, colData, mini, rng, sx, sz, w, d, h, { vines: true, allSides: true, garden: false });
+  addBuilding(B, colData, mini, rng, sx, sz, w, d, h, { vines: true, allSides: true, garden: false, style: 'blocks', noTier: true });
   // fallen shell leans from a street base up to the standing tower's south face at roof height
   const baseX = sx, baseZ = sz - d / 2 - h * 0.72, topX = sx, topZ = sz - d / 2 - 1, topY = h - 1;
   const dxx = topX - baseX, dzz = topZ - baseZ, horiz = Math.hypot(dxx, dzz);
@@ -1478,6 +2064,8 @@ function addOddities(B, colData, rng, ix, iz, ox, oz, type) {
 function buildChunk(ix, iz) {
   const rng = mulberry32(hash2(ix, iz, 999));
   const type = chunkType(ix, iz);
+  const style = districtStyle(ix, iz);        // Districts (Phase A): architectural identity
+  CUR_STYLE = style;                          // addBuilding reads this unless opts.style given
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch() };
   const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [] };
@@ -1544,19 +2132,31 @@ function buildChunk(ix, iz) {
     const L = CHUNK - 2 * INSET;
     for (const side of [0, 1, 2, 3]) {
       let t = 0;
-      while (t < L - 7) {
-        const w2 = Math.min(11 + rng() * 7, L - t);
-        if (w2 < 7) break;
-        const depth = 10 + rng() * 5;
-        const center = INSET + t + w2 / 2;
-        if (rng() < 0.84) {
-          const h = rng() < 0.15 ? 20 + rng() * 10 : 8 + rng() * 11;
+      while (t < L - 5) {
+        // per-district footprint: garden leaves yard gaps between small detached houses
+        const dm = bldDims(style, rng, rng() < 0.15);
+        const gap = style === 'garden' ? 3 + rng() * 3 : 0.6 + rng() * 0.6;
+        const along = Math.min(dm.w, L - t - 0.6);
+        const w2 = along + gap;
+        if (along < 5) break;
+        const depth = dm.d;
+        const center = INSET + t + along / 2;
+        if (rng() < (style === 'works' ? 0.9 : 0.84)) {
+          const h = dm.h;
           let bx, bz, bw, bd;
-          if (side === 0) { bx = ox + center; bz = oz + INSET + depth / 2; bw = w2 - 1.4; bd = depth; }
-          else if (side === 1) { bx = ox + center; bz = oz + CHUNK - INSET - depth / 2; bw = w2 - 1.4; bd = depth; }
-          else if (side === 2) { bx = ox + INSET + depth / 2; bz = oz + center; bw = depth; bd = w2 - 1.4; }
-          else { bx = ox + CHUNK - INSET - depth / 2; bz = oz + center; bw = depth; bd = w2 - 1.4; }
+          if (side === 0) { bx = ox + center; bz = oz + INSET + depth / 2; bw = along; bd = depth; }
+          else if (side === 1) { bx = ox + center; bz = oz + CHUNK - INSET - depth / 2; bw = along; bd = depth; }
+          else if (side === 2) { bx = ox + INSET + depth / 2; bz = oz + center; bw = depth; bd = along; }
+          else { bx = ox + CHUNK - INSET - depth / 2; bz = oz + center; bw = depth; bd = along; }
           addBuilding(B, colData, mini, rng, bx, bz, bw, bd, h);
+          // garden yards: dress the gap beside the house with fence / shed / laundry
+          if (style === 'garden' && gap > 2 && t + along + gap < L) {
+            const g0 = INSET + t + along + 0.2, g1 = INSET + t + along + gap - 0.2;
+            if (side === 0) addGardenYard(B, colData, rng, ox + g0, oz + INSET, ox + g1, oz + INSET + depth, [ox + INSET + t + along, oz + INSET + depth / 2]);
+            else if (side === 1) addGardenYard(B, colData, rng, ox + g0, oz + CHUNK - INSET - depth, ox + g1, oz + CHUNK - INSET, [ox + INSET + t + along, oz + CHUNK - INSET - depth / 2]);
+            else if (side === 2) addGardenYard(B, colData, rng, ox + INSET, oz + g0, ox + INSET + depth, oz + g1, [ox + INSET + depth / 2, oz + INSET + t + along]);
+            else addGardenYard(B, colData, rng, ox + CHUNK - INSET - depth, oz + g0, ox + CHUNK - INSET, oz + g1, [ox + CHUNK - INSET - depth / 2, oz + INSET + t + along]);
+          }
         } else {
           // collapsed lot: rubble, grass, a young tree
           let vx, vz;
@@ -1582,7 +2182,8 @@ function buildChunk(ix, iz) {
       if (rng() < 0.8) {
         const px = cellX + (rng() - 0.5) * 3, pz = cellZ + (rng() - 0.5) * 3;
         addBuilding(B, colData, mini, rng, px, pz, 18 + rng() * 4, 18 + rng() * 4, 5 + rng() * 3, { garden: true });
-        addBuilding(B, colData, mini, rng, px, pz, 12 + rng() * 4, 12 + rng() * 4, 28 + rng() * 26);
+        const dm = bldDims(style, rng, true);
+        addBuilding(B, colData, mini, rng, px, pz, dm.w, dm.d, dm.h);
       } else {
         addTree(B, colData, mini, rng, cellX, cellZ, 13 + rng() * 8, 5 + rng() * 3);
       }
@@ -1627,7 +2228,7 @@ function buildChunk(ix, iz) {
     }
   } else if (type === 'spire') {
     addBuilding(B, colData, mini, rng, SPIRE.x, SPIRE.z, SPIRE.size, SPIRE.size, SPIRE.h,
-      { vines: true, allSides: true, garden: false });
+      { vines: true, allSides: true, garden: false, style: 'blocks', noTier: true });   // keep the iconic single tower
     // ring of guardian trees
     for (let k = 0; k < 6; k++) {
       const a = k / 6 * Math.PI * 2 + rng() * 0.4;
@@ -1722,7 +2323,7 @@ function buildChunk(ix, iz) {
   ];
   for (const m of meshes) if (m) group.add(m);
   for (const m of extraMeshes) group.add(m);
-  return { ix, iz, group, colData, mini, openRect, type, name: districtName(ix, iz) };
+  return { ix, iz, group, colData, mini, openRect, type, style, name: districtName(ix, iz) };
 }
 
 /* ======================================================================== */
@@ -1930,11 +2531,24 @@ function updateSky(t) {
 function makeSeaTexture() {
   const S = 512, r = mulberry32(2024);
   const c = makeCanvas(S, S), x = c.getContext('2d');
-  x.fillStyle = '#4a7431'; x.fillRect(0, 0, S, S);
-  for (let i = 0; i < 900; i++) {
-    const rr = 6 + r() * 22;
-    x.fillStyle = `hsl(${82 + (r() - 0.5) * 30},${38 + r() * 28}%,${26 + r() * 26}%)`;
+  x.fillStyle = '#2c4a1e'; x.fillRect(0, 0, S, S);
+  // deep shadow pits between crowns
+  for (let i = 0; i < 160; i++) {
+    const rr = 8 + r() * 26;
+    x.fillStyle = `rgba(14,26,10,${0.3 + r() * 0.4})`;
     x.beginPath(); x.arc(r() * S, r() * S, rr, 0, 7); x.fill();
+  }
+  // each crown = shadowed base disc + sun-lit lobe offset toward the light,
+  // so from above the canopy reads as rounded masses instead of flat felt
+  for (let i = 0; i < 520; i++) {
+    const rr = 7 + r() * 22, cx2 = r() * S, cy2 = r() * S;
+    const hpx = 84 + (r() - 0.5) * 28, sat = 36 + r() * 26, lig = 20 + r() * 14;
+    x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
+    x.beginPath(); x.arc(cx2, cy2, rr, 0, 7); x.fill();
+    x.fillStyle = `hsl(${hpx},${sat}%,${lig + 12 + r() * 10}%)`;
+    x.beginPath(); x.arc(cx2 - rr * 0.22, cy2 - rr * 0.22, rr * 0.7, 0, 7); x.fill();
+    x.fillStyle = `hsl(${hpx},${sat - 6}%,${lig + 24 + r() * 12}%)`;
+    x.beginPath(); x.arc(cx2 - rr * 0.34, cy2 - rr * 0.34, rr * 0.32, 0, 7); x.fill();
   }
   const t = canvasTex(c); t.repeat.set(7, 7);
   return t;
@@ -2768,6 +3382,14 @@ function perfNow() { return performance.now(); }
 
 const seen = {};
 function once(key, fn) { if (!seen[key]) { seen[key] = true; fn(); } }
+// Districts (Phase B): first-entry mood lines, keyed by architectural style.
+const DISTRICT_MOOD = {
+  oldtown: 'Narrow plaster lanes and pitched roofs. Shutters hang crooked; an awning still keeps its faded stripe.',
+  blocks: 'Grey slab estates, balconies stacked like drawers. A mural fades on one blank wall, half-swallowed by ivy.',
+  glass: 'Glass towers, tiered and cold. The vines have barely started on these — the light still catches every pane.',
+  works: 'Rust and old machines. Silos and sawtooth sheds, a dead chimney against the sky. The air tastes of iron.',
+  garden: 'Little houses with yards and low fences. Someone’s laundry never came in; the gardens have gone to seed.',
+};
 
 /* ======================================================================== */
 /*  AUDIO (all synthesized)                                                 */
@@ -2982,6 +3604,11 @@ function loop() {
       else once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
     }
     if (nightF > 0.6) once('night', () => { msg('Night. The glow-moss wakes, and the fireflies with it.', 7); hint('The lamps still hum — press F for your flashlight', 6); });
+    // Districts (Phase B): a mood line the first time you set foot in each style of quarter.
+    if (player.pos.y < 6) {
+      const dc = chunkAt(player.pos.x, player.pos.z);
+      if (dc && dc.type !== 'spire') once('district-' + dc.style, () => msg(DISTRICT_MOOD[dc.style], 7));
+    }
     for (const n of npcs) {
       if (Math.hypot(n.g.position.x - player.pos.x, n.g.position.z - player.pos.z) < 7) {
         once('people', () => msg('The under-dwellers nod as you pass. Life goes on, just… lower.', 7));
