@@ -165,7 +165,8 @@ sun.shadow.bias = -0.0006;
 sun.shadow.normalBias = 0.4;
 scene.add(sun); scene.add(sun.target);
 
-const hemi = new THREE.HemisphereLight(0xbadfff, 0x1c2a16, 0.5);
+// ground term lifts the undersides of canopy/leaves seen from the street; kept modest so night stays put
+const hemi = new THREE.HemisphereLight(0xbadfff, 0x2c4020, 0.5);
 scene.add(hemi);
 const amb = new THREE.AmbientLight(0x405040, 0.16);
 scene.add(amb);
@@ -820,7 +821,7 @@ const LEAF_DEEP = srgb(0x1e4412);     // saturated dark green — the flora won
 const LEAF_ASH = srgb(0x8f938a);      // grey-dusted (dead city under an intact roof)
 function leafTintByY(base, y) {
   const t = smooth(8, 38, y);                               // 0 street canopy · 1 emergent crowns
-  const c = _c.copy(base).multiplyScalar(0.80 + 0.42 * t)   // darker low → brighter high
+  const c = _c.copy(base).multiplyScalar(0.90 + 0.38 * t)   // darker low → brighter high (low canopy lifted)
     .lerp(COL.leafDry, t * 0.14);                           // faint sun-bleach up top
   if (typeof CUR_REG !== 'undefined' && CUR_REG) {
     if (CUR_REG.biome === 'scorch') c.lerp(LEAF_SCORCH, 0.55);

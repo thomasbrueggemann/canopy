@@ -9,6 +9,7 @@ const player = {
   yaw: Math.atan2(-(SPIRE.x - 2.2), -(SPIRE.z - 2.2)),  // face the spire
   pitch: 0,
   grounded: false, climbing: false, onCanopy: false, supportLayer: null,
+  onLadder: null,                                         // Ladders: {lad} while latched to a rung ladder
   heat: 0, exposed: false, inPit: false, inWater: false,
   bob: 0, stride: 0,
   airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0,
@@ -26,10 +27,26 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM') toggleAudio();
   if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
   if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
+  // Satchel (inventory.js): I toggles it, Tab leafs through while open. preventDefault only when
+  // the satchel owns the Tab (satchelCycle returns false when closed) so focus never leaves the canvas.
+  if (e.code === 'KeyI' && started && typeof satchelToggle === 'function') satchelToggle();
+  if (e.code === 'Tab' && started && typeof satchelCycle === 'function') { if (satchelCycle()) e.preventDefault(); }
   if (e.code === 'KeyE' && started) {
+    // Latched to a ladder: E always lets go FIRST — before any positional interaction (a cache,
+    // plaque, journal page, or the Tinker that happens to sit within reach, e.g. the Four Seasons
+    // cache beside the fallen-tower ladder) can steal the press. Reset airPeakY so the ensuing
+    // fall is measured from the release point, not a stale pre-latch apex (an airborne latch-save).
+    if (player.onLadder) { player.onLadder = null; player.airPeakY = player.pos.y; }
     // Story first (Part 2): the Archivist / campaign interactions are rare & positional, so they
     // win ties over the trial-master and errand giver. storyInteract() returns true if it consumed E.
-    if (typeof storyInteract === 'function' && storyInteract()) { /* consumed by the campaign */ }
+    else if (typeof storyInteract === 'function' && storyInteract()) { /* consumed by the campaign */ }
+    // Ciphers next (story > puzzles > inventory > trial > errand): the Tinker & the five caches.
+    // puzzleInteract() returns true if it consumed E.
+    else if (typeof puzzleInteract === 'function' && puzzleInteract()) { /* consumed by the Ciphers */ }
+    // Inventory next: picking up a journal page within reach. Returns true if it consumed E.
+    else if (typeof inventoryInteract === 'function' && inventoryInteract()) { /* picked up a journal page */ }
+    // Ladders next (after inventory, before the trial-master): latch onto / release a ladder.
+    else if (typeof ladderInteract === 'function' && ladderInteract()) { /* latched or released a ladder */ }
     else {
       const tm = (typeof nearestTrialMaster === 'function') ? nearestTrialMaster(3.4) : null;
       if (tm && !trial) { offerTrial(tm); }
@@ -67,7 +84,7 @@ function showOverlay(paused) {
 
 /* ---- collision helpers ---- */
 function collectColliders(px, pz, out) {
-  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0; out.pits.length = 0; out.waters.length = 0;
+  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0; out.pits.length = 0; out.waters.length = 0; out.ladders.length = 0;
   const cx = Math.floor(px / CHUNK), cz = Math.floor(pz / CHUNK);
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     const c = chunks.get(chunkKey(cx + dx, cz + dz));
@@ -77,14 +94,46 @@ function collectColliders(px, pz, out) {
     for (const p of c.colData.pads) out.pads.push(p);
     for (const pit of c.colData.pits) out.pits.push(pit);
     for (const w of c.colData.waters) out.waters.push(w);
+    if (c.colData.ladders) for (const l of c.colData.ladders) out.ladders.push(l);
   }
 }
-const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [] };
+const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [], ladders: [] };
 
 function stepPlayer(dt) {
   const p = player;
   const feet = () => p.pos.y;
   const wasGrounded = p.grounded, wasClimbing = p.climbing;
+
+  // --- Ladder latch (Ladders feature): a locked-in climb mode, no facing cone, no
+  // pitch tricks. Runs BEFORE the normal move/gravity/wind step and returns early, so the
+  // weather gust can never shove the player off a ladder. Heat/exposure still tick in
+  // stepHeat (called separately). W/S climb; Space hops off; E lets go (ladderInteract). ---
+  if (p.onLadder) {
+    const lad = p.onLadder;
+    p.climbing = false; p.grounded = false; p.onCanopy = false; p.supportLayer = null;
+    p.vel.set(0, 0, 0);
+    p.pos.x = lad.x + lad.nx * 0.55;                     // stay snapped to the climb line
+    p.pos.z = lad.z + lad.nz * 0.55;
+    collectColliders(p.pos.x, p.pos.z, nearby);          // keep the heat/sun probe arrays current
+    const up = keys.KeyW || keys.ArrowUp, down = keys.KeyS || keys.ArrowDown;
+    const spd = CLIMB_SPEED * 1.25;                      // ladders are faster than vines — the comfortable path
+    if (up) p.pos.y += spd * dt;
+    else if (down) p.pos.y -= spd * dt;
+    if (up && p.pos.y >= lad.y1 - 0.3) {                 // top-out → auto-mantle onto the deck/rest platform
+      p.pos.x = lad.x - lad.nx * 0.9; p.pos.z = lad.z - lad.nz * 0.9;
+      p.pos.y = lad.y1 + 0.05; p.vel.y = 2.2;            // small upward pop inward
+      p.onLadder = null; p.airPeakY = p.pos.y;
+    } else if (down && p.pos.y <= lad.y0 + 0.05) {       // bottom-out → grounded, release
+      p.pos.y = lad.y0; p.grounded = true; p.onLadder = null; p.airPeakY = p.pos.y;
+    } else if (keys.Space) {                             // hop off backward
+      p.vel.x = lad.nx * 2.5; p.vel.z = lad.nz * 2.5; p.vel.y = 3;
+      p.onLadder = null; p.airPeakY = p.pos.y;
+    }
+    camera.position.set(p.pos.x, p.pos.y + EYE, p.pos.z);
+    if (p.shake > 0) { camera.position.x += (Math.random() - 0.5) * p.shake * 0.4; p.shake = Math.max(0, p.shake - dt * 2.6); }
+    camera.rotation.set(p.pitch, p.yaw, 0, 'YXZ');
+    return null;
+  }
 
   // input direction
   const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
@@ -99,11 +148,18 @@ function stepPlayer(dt) {
   // Trials reward: +10% sprint. Second Seed (Part 2, Ch6/7): sprint disabled while carrying the Seed.
   const carrying = typeof storyCarrying !== 'undefined' && storyCarrying;
   const sprintF = ((keys.ShiftLeft || keys.ShiftRight) && !carrying) ? SPRINT * (sprintBoost ? 1.1 : 1) : 1;
-  const speed = WALK * sprintF * (p.inWater ? 0.35 : 1) * (p.stagger > 0 ? 0.45 : 1);   // wading is slow; a hard landing staggers
+  let speed = WALK * sprintF * (p.inWater ? 0.35 : 1) * (p.stagger > 0 ? 0.45 : 1);   // wading is slow; a hard landing staggers
+  // The Long Rain floods the streets: standing water slows walking at ground level (not in
+  // water/pit — those have their own rules). Uses last frame's inWater/inPit (set below).
+  const _wx = (typeof WX !== 'undefined') ? WX : null;
+  if (_wx && _wx.floodSlow < 1 && p.grounded && p.pos.y < 0.6 && !p.inWater && !p.inPit) speed *= _wx.floodSlow;
   if (p.stagger > 0) p.stagger = Math.max(0, p.stagger - dt);
   const accel = p.grounded ? 11 : 3;
   p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
   p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
+  // Weather gust shove: a m/s nudge added to velocity (hard-capped below WALK in weather.js,
+  // so it can never pin the player or blow them off a bough while standing still).
+  if (_wx) { p.vel.x += _wx.windX * dt; p.vel.z += _wx.windZ * dt; }
 
   // gravity
   if (!p.climbing) p.vel.y -= GRAV * dt;
@@ -213,6 +269,8 @@ function stepPlayer(dt) {
   }
   const bobY = (p.grounded ? Math.sin(p.bob * 2) * 0.042 * Math.min(1, hSpeed / 4) : 0);
 
+  ladderProxTick(dt);   // Ladders: throttled "E — climb the ladder" prompt when one is close
+
   camera.position.set(p.pos.x, p.pos.y + EYE + bobY, p.pos.z);
   if (p.shake > 0) {
     camera.position.x += (Math.random() - 0.5) * p.shake * 0.4;
@@ -225,12 +283,58 @@ function stepPlayer(dt) {
   return climbNormal;
 }
 
+/* ---- Ladders (Ladders feature): latch finder, interact, proximity hint ------
+   The nearest ladder whose climb line is within `radius` horizontally and whose
+   span contains (or is within 1.5 m of) the player's feet. Pure scan of the 3×3
+   nearby.ladders gathered in collectColliders — no state, safe to call anytime. */
+function nearestLatchableLadder(radius) {
+  const p = player;
+  let best = null, bd = radius * radius;
+  for (const lad of nearby.ladders) {
+    const dx = p.pos.x - lad.x, dz = p.pos.z - lad.z;
+    const hd2 = dx * dx + dz * dz;
+    if (hd2 >= bd) continue;
+    const fy = clamp(p.pos.y, lad.y0, lad.y1);              // nearest point of the span to the feet
+    if (Math.abs(p.pos.y - fy) > 1.5) continue;            // feet must be within 1.5 m of the run
+    bd = hd2; best = lad;
+  }
+  return best;
+}
+// E in the interact chain (after inventory, before the trial-master). Latched → let go in
+// place (falls; the fall rules handle it). Unlatched & a ladder is in catch range → latch.
+// Returns true when it consumed the E press. Airborne latching IS allowed (a deliberate save).
+function ladderInteract() {
+  const p = player;
+  if (p.onLadder) { p.onLadder = null; return true; }      // let go — a deliberate release
+  const lad = nearestLatchableLadder(1.6);
+  if (!lad) return false;
+  p.onLadder = lad;
+  p.vel.set(0, 0, 0);
+  p.pos.x = lad.x + lad.nx * 0.55;                          // snap to the climb line, offset along the normal
+  p.pos.z = lad.z + lad.nz * 0.55;
+  p.pos.y = clamp(p.pos.y, lad.y0, lad.y1);                 // pull the feet onto the span
+  p.grounded = false; p.climbing = false;
+  once('ladder', () => msg('Waytrees. Someone keeps the rungs oiled — the lookouts belong to everyone.', 8, true));
+  return true;
+}
+let ladderHintT = 0;
+function ladderProxTick(dt) {
+  if (player.onLadder) return;
+  ladderHintT -= dt;
+  if (ladderHintT > 0) return;
+  const lad = nearestLatchableLadder(2.2);
+  if (!lad) return;
+  ladderHintT = 1.5;                                        // throttle: at most one prompt every 1.5 s
+  hint('E — climb the ladder', 2);
+  once('ladder', () => msg('Waytrees. Someone keeps the rungs oiled — the lookouts belong to everyone.', 8, true));
+}
+
 /* ---- fall consequences -----------------------------------------------------
    Leaf layers (the Weave, crown nests, boughs, tree-canopy pads) and water always
    catch you. Hard ground / roofs / the viaduct deck / streets hurt: a 7–10 m drop
    staggers; over 10 m blacks you out — you wake in the last shade, hotter, and any
    Trial or errand in progress is lost. Normal jumps (a 3 m wall ≈ 4 m drop) are free. */
-const SAFE_LEAF = { weave: 1, nest: 1, bough: 1, net: 1 };   // + tree-canopy pads (onCanopy, no layer tag)
+const SAFE_LEAF = { weave: 1, nest: 1, bough: 1, net: 1, lookout: 1 };   // + tree-canopy pads (onCanopy, no layer tag); lookout decks/rest-platforms catch you
 function handleLanding(drop) {
   const p = player;
   // Sky nets (Feature B): a walkable net catches you from any height and springs you back —
@@ -346,18 +450,32 @@ function stepHeat(dt) {
   const airBase = lerp(27, 46, dayF);
   let air = airBase + (p.exposed ? 11 : 0) - clamp((p.pos.y - 40) * 0.04, 0, 3);
   if (deepPit) air -= 6;                                     // cooler at the bottom
-  const heatRate = dayF * 2.6 * smooth(0.25, 0.9, E);        // E<0.25 shaded, dappled = slow burn, full shaft = full burn
+  // Gardener's Mantle (Part 2 reward): parasol-leaf cloak drops body-heat gain ×0.75 (typeof-
+  // guarded like storyCarrying — puzzles.js may load after this file's first evaluation).
+  const mantleF = (typeof ciphMantle !== 'undefined' && ciphMantle) ? 0.75 : 1;
+  // Weather mixer (safe-defaulted when weather.js is absent / in SHOT): the White Hour
+  // multiplies the burn rate, the Long Rain zeroes it (rain cools), the dust storm leaves it.
+  const _wx = (typeof WX !== 'undefined') ? WX : null;
+  let heatRate = dayF * 2.6 * smooth(0.25, 0.9, E) * mantleF;   // E<0.25 shaded, dappled = slow burn, full shaft = full burn
+  if (_wx) heatRate *= _wx.heatMul;
   if (dayF > 0.05 && heatRate > 0) p.heat += dt * heatRate;  // ~40 s to overheat in a full noon shaft
   else {
     let drain = 7;                                           // base shade drain
     if (deepPit) drain = 14;                                 // ~2× in the pit
     if (p.inWater) drain = 28;                               // ~4× wading in cool water
+    if (_wx) drain *= _wx.heatDrainMul;                      // the Long Rain drains 1.5× while out in it
     p.heat -= dt * drain;
   }
+  // Dust storm (the Grey Wind): body-heat bar doubles as general strain while unsheltered —
+  // ~30 s of open exposure to faint, and the faint wakes you in the last (sheltered) shade.
+  if (_wx && _wx.strain > 0 && !(typeof weatherShelter === 'function' && weatherShelter()))
+    p.heat += dt * _wx.strain;
   p.heat = clamp(p.heat, 0, 100);
 
   shadeTimer += dt;
-  if (E < 0.25 && p.grounded && p.pos.y < CANOPY_Y && shadeTimer > 1) { lastShade.copy(p.pos); shadeTimer = 0; }
+  // The White Hour lowers the exposure that still "counts as shade" for the R-key recall anchor.
+  const shadeE = _wx ? Math.min(0.25, _wx.shadeSafeE) : 0.25;
+  if (E < shadeE && p.grounded && p.pos.y < CANOPY_Y && shadeTimer > 1) { lastShade.copy(p.pos); shadeTimer = 0; }
 
   if (p.heat >= 100) {
     // heatstroke: stagger back to the last shade
@@ -369,6 +487,7 @@ function stepHeat(dt) {
     }, 850);
     p.heat = 99; // don't retrigger while fading
   }
+  if (_wx) air += _wx.airAdd;   // the White Hour shows a hotter air reading (+9 °C at peak)
   return air;
 }
 

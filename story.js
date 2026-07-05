@@ -152,7 +152,14 @@ function findReservoir(minR, exclude) {
   return { ix: rv.ix, iz: rv.iz, x: rv.ix * CHUNK + 32, z: rv.iz * CHUNK + 32, y: 8 };
 }
 // Ch2c: nearest crown-nest pad — loaded chunks first, then a ring-peek of grove/colossus chunks.
+// Ladders: prefer the nearest waytree lookout (a forgiving ladder climb, recomputed by pure
+// hash — no chunk build). Falls through to the original crown-nest behaviour when none is near.
 function findNestPad() {
+  if (typeof nearestWaytree === 'function') {
+    const { cx, cz } = playerChunk();
+    const w = nearestWaytree(cx, cz, 16, 1);   // ≥1 chunk out so it stays a real climb elsewhere
+    if (w) return { x: w.x, z: w.z, y: w.y };
+  }
   let best = null, bd = 1e9;
   for (const c of chunks.values()) for (const p of c.colData.pads) {
     if (p.layer !== 'nest') continue;

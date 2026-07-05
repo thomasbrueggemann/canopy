@@ -161,8 +161,8 @@ function updateSky(t, dt) {
   }
   colA.needsUpdate = true;
 
-  // fog tinted toward the leaves during the day
-  _fogC.copy(_hor).lerp(COL.moss, 0.34 * dayF);
+  // fog tinted toward the leaves during the day (lighter tint keeps the far street tunnels open, not murky)
+  _fogC.copy(_hor).lerp(COL.moss, 0.26 * dayF);
   scene.fog.color.copy(_fogC);
   renderer.setClearColor(_fogC);
 
@@ -179,10 +179,10 @@ function updateSky(t, dt) {
   } else {
     sun.intensity = 0.14;
   }
-  hemi.intensity = 0.37 + dayF * 0.68;
+  hemi.intensity = 0.37 + dayF * 1.14;   // higher daytime sky-fill lifts the shaded understory (night = 0.37, unchanged)
   // raw night-sky colors are near-black, so lerp toward moonlight or the night floor does nothing
   hemi.color.copy(_top).lerp(_hor, 0.6).lerp(SKY.moon, nightF * 0.55);
-  amb.intensity = 0.26 + dayF * 0.18 + nightF * 0.2;
+  amb.intensity = 0.26 + dayF * 0.50 + nightF * 0.2;   // brighter daytime ambient floor for deep-shade streets
   seaMat.color.copy(COL.leafB).multiplyScalar(0.16 + dayF * 0.95);
 
   // sky objects

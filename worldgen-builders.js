@@ -51,6 +51,41 @@ function chunkType(ix, iz) {
   if (ix === HAMLET.cx && iz === HAMLET.cz) return 'hamlet';
   return baseChunkType(ix, iz);
 }
+/* ---- Waytrees (Ladders feature): recomputable landmark spec -----------------
+   A waytree's existence AND its exact (x, z, deckY) are pure functions of the
+   chunk coords via hash2 — so finders/trials in story.js/main.js can locate a
+   waytree lookout without building (or peeking) the chunk, and the builder in
+   buildChunk places it from THIS SAME function, guaranteeing byte-identical
+   geometry. Every third grove and every fourth park carries one.  Returns
+   null | { x, z, deckY }.  deckY ∈ [22,30).  Global (var) so it is callable
+   from the later-loaded gameplay files. */
+var waytreeSpec = function (ix, iz) {
+  const t = chunkType(ix, iz);
+  const ok = (t === 'grove' && hash2(ix, iz, 7301) % 3 === 0) ||
+             (t === 'park'  && hash2(ix, iz, 7302) % 4 === 0);
+  if (!ok) return null;
+  const x = ix * CHUNK + 20 + hash2(ix, iz, 7303) % 24;   // central-ish, inside the block
+  const z = iz * CHUNK + 20 + hash2(ix, iz, 7305) % 24;
+  const deckY = 22 + hash2(ix, iz, 7304) % 8;             // canopy-height lookout, [22,30)
+  return { x, z, deckY };
+};
+// Nearest waytree deck to chunk (cx,cz) in a Chebyshev ring scan (pure recompute,
+// no chunk build). Returns { x, z, y:deckY, ix, iz } or null. Shared by the crown-nest
+// chapter (story.js) and the Ascent trial (main.js).
+var nearestWaytree = function (cx, cz, maxR, minR) {
+  for (let r = (minR || 0); r <= maxR; r++) {
+    let best = null, bd = 1e9;
+    for (let dx = -r; dx <= r; dx++) for (let dz = -r; dz <= r; dz++) {
+      if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+      const ix = cx + dx, iz = cz + dz, w = waytreeSpec(ix, iz);
+      if (!w) continue;
+      const d = dx * dx + dz * dz;
+      if (d < bd) { bd = d; best = { x: w.x, z: w.z, y: w.deckY, ix, iz }; }
+    }
+    if (best) return best;
+  }
+  return null;
+};
 // Deterministic ring of giants carrying the treehouse village (pure from HAMLET — no rng —
 // so the resident-NPC anchors and the platform build agree). h 32–40, platforms y 15–19.
 function hamletGiants() {
@@ -270,7 +305,7 @@ function addWeave(B, colData, rng, ix, iz, ox, oz, type) {
     for (let f = 0; f < nFr; f++) {
       const a = rng() * Math.PI * 2, rr = pl.R * (0.5 + rng() * 0.38);
       const fx = pl.x + Math.cos(a) * rr, fz = pl.z + Math.sin(a) * rr;
-      const len = rng() < 0.3 ? 2.8 + rng() * 1.4 : 0.5 + rng() * 2.0, w = 0.22 + rng() * 0.34;   // some hang to ~4 m (head height under platters)
+      const len = rng() < 0.2 ? 2.8 + rng() * 1.4 : 0.5 + rng() * 2.0, w = 0.22 + rng() * 0.34;   // fewer hang to head height — opens the understory (rng-neutral: same call count)
       const dx = Math.cos(a) * w / 2, dz = Math.sin(a) * w / 2;
       const col = _c.copy(COL.vine).multiplyScalar(0.58 + rng() * 0.34).clone();
       B.vine.quad([fx - dx, under - len, fz - dz], [fx + dx, under - len, fz + dz], [fx + dx, under, fz + dz], [fx - dx, under, fz - dz],
@@ -1311,6 +1346,97 @@ function addLamp(B, colData, rng, x, z, armAng) {
   }
   colData.trunks.push({ x, z, r: 0.14, h: 4.6 });
   colData.lamps.push({ x, z, working, hx: x + dx * 1.45, hy: 4.18, hz: z + dz * 1.45 });
+}
+
+/* ---- Ladders (Ladders feature) ---------------------------------------------
+   A rung ladder strapped to a vertical face: two thin wood side-rails and rungs
+   every ~0.45 m, all batched into B.plain (wood/brass palette). (nx,nz) is the
+   outward face normal — the side the player hangs on. Registers a climb volume
+   in colData.ladders as a vertical line segment + normal; player.js does the
+   latch. Runs longer than ~16 m get a small rest platform pad (layer 'lookout',
+   a caught landing) every ~14 m so a long climb reads as a deliberate route.
+   (Extends the spec's addLadder(B,x,z,y0,y1,nx,nz) with colData+rng, like every
+   other builder — it must register collision + jitter its geometry.) */
+function addLadder(B, colData, rng, x, z, y0, y1, nx, nz) {
+  const nl = Math.hypot(nx, nz) || 1; nx /= nl; nz /= nl;
+  const tx = -nz, tz = nx;                                   // horizontal tangent along the face
+  const railHalf = 0.28, off = 0.06;                         // rail spacing, stand-off from the face
+  const rail = _c.copy(COL.wood).multiplyScalar(1.1 + rng() * 0.2).clone();
+  const rung = _c.copy(COL.rust).multiplyScalar(0.9 + rng() * 0.2).clone();   // brassy rungs
+  const H = y1 - y0;
+  if (H <= 0) return;
+  const yaw = Math.atan2(nx, nz);                            // face the box's z-thickness along the normal
+  // two side-rails (thin tall boxes)
+  for (const s of [-1, 1]) {
+    const rx = x + tx * railHalf * s + nx * off, rz = z + tz * railHalf * s + nz * off;
+    B.plain.addGeo(tplBox, compose(rx, y0, rz, 0.08, H, 0.08, 0, yaw, 0), rail, 0.12, rng);
+  }
+  // rungs every ~0.45 m
+  const nR = Math.max(1, Math.floor(H / 0.45));
+  for (let k = 0; k <= nR; k++) {
+    const ry = y0 + k * (H / nR);
+    B.plain.addGeo(tplBoxC, compose(x + nx * (off + 0.02), ry, z + nz * (off + 0.02), 0.05, 0.05, railHalf * 2 + 0.1, 0, yaw, 0), rung, 0.1, rng);
+  }
+  // rest platforms on long runs (deliberate stacked-segment feel + a caught landing)
+  if (H > 16) {
+    const segs = Math.ceil(H / 14);
+    for (let k = 1; k < segs; k++) {
+      const py = y0 + (H / segs) * k;
+      const cxp = x + nx * 1.2, czp = z + nz * 1.2;          // ledge juts out along the normal
+      const plat = _c.copy(COL.wood).multiplyScalar(0.9).clone();
+      B.plain.addGeo(tplCyl, compose(cxp, py - 0.12, czp, 1.6, 0.24, 1.6), plat, 0.1, rng);
+      colData.pads.push({ x: cxp, z: czp, r: 1.5, y: py, layer: 'lookout' });
+    }
+  }
+  colData.ladders.push({ x, z, y0, y1, nx, nz });
+}
+
+/* ---- Waytrees (Ladders feature) --------------------------------------------
+   A special mission tree: one thick tall trunk (existing addTree idiom → a
+   colData.trunks entry + canopy), a ground-to-deck rung ladder, and a treehouse
+   lookout at canopy height — a round plank deck (colData.pads, layer 'lookout',
+   the friendly vantage), visual-only railing posts + a small pitched roof on
+   posts over half the deck (the roof registers NO solid, so the deck stays sky-
+   open and valid as a vantage point), and a lamp at the rim (colData.lamps) so
+   the waytree glows at night as a navigation beacon. Position/height come from
+   waytreeSpec(ix,iz) so finders can recompute it. Called LAST in buildChunk so
+   its rng draws never shift other chunk content (RNG discipline). */
+function addWaytree(B, colData, mini, rng, x, z, deckY) {
+  const trunkH = deckY + 13;                                 // crown caps well ABOVE the deck so the
+  addTree(B, colData, mini, rng, x, z, trunkH, 9 + rng() * 2, { trunkR: 2.1, blobs: 5 });  // lookout stays open-sided (a real vantage)
+  // ladder up the +x face of the trunk, ground to deck
+  const lx = x + 2.4, lz = z;
+  addLadder(B, colData, rng, lx, lz, 0, deckY, 1, 0);
+  // round plank deck around the trunk at deck height
+  const r = 2.6;
+  const plank = _c.copy(COL.wood).multiplyScalar(1.05 + rng() * 0.2).clone();
+  const plankDk = _c.copy(COL.wood).multiplyScalar(0.6).clone();
+  B.plain.addGeo(tplCyl, compose(x, deckY - 0.16, z, r, 0.3, r), plank, 0.12, rng);       // deck slab
+  B.plain.addGeo(tplCyl, compose(x, deckY + 0.01, z, r, 0.02, r), plankDk, 0.1, rng);     // faint plank grain
+  colData.pads.push({ x, z, r: r - 0.2, y: deckY, layer: 'lookout' });                    // the vantage deck
+  // railing posts around the rim (visual only), gap on the ladder side (+x)
+  const posts = 12;
+  for (let k = 0; k < posts; k++) {
+    const a = k / posts * Math.PI * 2;
+    if (Math.cos(a) > 0.72) continue;                        // leave the ladder mouth open
+    const px = x + Math.cos(a) * (r - 0.2), pz = z + Math.sin(a) * (r - 0.2);
+    B.plain.addGeo(tplCyl, compose(px, deckY, pz, 0.05, 0.82, 0.05), COL.deadwood, 0.1, rng);
+    if (k % 2 === 0)                                         // top rail cap between posts
+      B.plain.addGeo(tplBoxC, compose(px, deckY + 0.8, pz, 0.06, 0.06, 0.06), COL.deadwood, 0.1, rng);
+  }
+  // small pitched roof on four posts over half the deck — VISUAL ONLY (no solid).
+  const roofY = deckY + 2.3, rr = r * 0.72;
+  const roofCol = srgb(0x5a3a28), gableCol = srgb(0x6b4630);
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    const cx2 = x + sx * rr * 0.7, cz2 = z + sz * rr * 0.7;
+    B.plain.addGeo(tplCyl, compose(cx2, deckY, cz2, 0.05, roofY - deckY, 0.05), COL.wood, 0.1, rng);   // roof post
+  }
+  addGableRoof(B, x - rr, z - rr, x + rr, z + rr, roofY, roofCol, gableCol);
+  // beacon lamp at the deck rim (−x side, opposite the ladder), glows at night
+  const hx = x - r + 0.3, hz = z, hy = deckY + 2.0;
+  B.plain.addGeo(tplCyl, compose(hx, deckY, hz, 0.06, 2.0, 0.06), COL.lampPole, 0, rng);   // short lamp post
+  B.lamp.addGeo(tplBox, compose(hx, hy, hz, 0.32, 0.22, 0.32), srgb(0xfff1cf), 0, rng);    // glowing head
+  colData.lamps.push({ x: hx, z: hz, working: true, hx, hy, hz });
 }
 
 /* ---- power poles & sagging wires ---- */

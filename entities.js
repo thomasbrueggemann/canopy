@@ -99,6 +99,10 @@ const npcLanternMat = new THREE.MeshStandardMaterial({ color: 0x2a2a22, emissive
 // eight citizen cloaks so the campaign's one NPC reads on sight.
 const npcArchivistCloak = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 1 });
 const npcPaperMat = new THREE.MeshStandardMaterial({ color: 0xcabf9a, roughness: 0.9 });
+// The Tinker (Part 2 Ciphers giver): a coppery apron + a tool-bench of brass gears and a small
+// brazier so she reads at night — distinct on sight from the eight citizens and the Archivist.
+const npcTinkerCloak = new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 1 });
+const npcBrassMat = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.5, metalness: 0.3 });
 
 const npcs = [];
 function makeNPCGroup(kid, role) {
@@ -134,6 +138,15 @@ function makeNPCGroup(kid, role) {
     const crate2 = new THREE.Mesh(tplBox, npcWoodMat); crate2.scale.set(0.36, 0.22, 0.42); crate2.position.set(-0.52, 0.34, 0.08);
     const paper = new THREE.Mesh(tplBox, npcPaperMat); paper.scale.set(0.32, 0.04, 0.28); paper.position.set(-0.52, 0.57, 0.08);
     g.add(staff, orb, crate, crate2, paper); anim = orb;
+  } else if (role === 'tinker') {
+    // a coppery apron, a low tool-bench with brass gears, and a brazier glow (anim = brazier
+    // emissive, driven like the archivist's orb) — the Ciphers' one NPC, reads on sight.
+    cloak.material = npcTinkerCloak; hood.material = npcTinkerCloak;
+    const bench = new THREE.Mesh(tplBox, npcWoodMat); bench.scale.set(1.1, 0.5, 0.55); bench.position.set(0.55, 0, 0.2);
+    const gear1 = new THREE.Mesh(tplWheel, npcBrassMat); gear1.scale.setScalar(0.16); gear1.position.set(0.4, 0.6, 0.3);
+    const gear2 = new THREE.Mesh(tplWheel, npcBrassMat); gear2.scale.setScalar(0.11); gear2.position.set(0.68, 0.58, 0.18);
+    const brazier = new THREE.Mesh(tplBlob, npcLanternMat); brazier.scale.setScalar(0.11); brazier.position.set(-0.5, 0.7, 0.1);
+    g.add(bench, gear1, gear2, brazier); anim = brazier;
   } else if (role === 'chat' || role === 'vendor') {
     // a simple pivoting arm so a talker/vendor can raise a hand while gesturing
     const arm = new THREE.Group();

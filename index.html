@@ -76,6 +76,7 @@
     min-width:190px;
   }
   #clock{ font-size:17px; color:#e6f2d5; letter-spacing:.12em; }
+  #wx{ font-size:11px; letter-spacing:.14em; color:#d7b48a; text-transform:uppercase; transition:opacity .5s; }
   #district{ color:#9fbe86; font-size:11.5px; letter-spacing:.08em; text-transform:uppercase; }
   #envline{ color:#b9c8aa; }
   #envline .exposed{ color:#ffb45e; }
@@ -110,6 +111,26 @@
   }
   .msg.gold{ color:#ffe9a8; border-color:rgba(255,220,130,.3); }
   @keyframes msgin{ from{opacity:0; transform:translateY(10px)} to{opacity:1; transform:none} }
+
+  /* ---------- satchel (inventory) ---------- */
+  #satchel{
+    position:absolute; right:14px; top:250px; width:266px; padding:12px 14px;
+    font-size:12px; pointer-events:auto; display:none;
+  }
+  #satchelHead{ color:#e8d98a; letter-spacing:.08em; margin-bottom:9px; }
+  #satchelHead span{ color:#7e9a6c; font-size:10.5px; letter-spacing:.03em; }
+  #satchelList{ display:flex; flex-direction:column; gap:2px; }
+  .satrow{ display:flex; align-items:center; gap:8px; padding:3px 6px; border-radius:5px; color:#c9d6bd; }
+  .satrow .ico{ width:16px; text-align:center; color:#cfe3b8; }
+  .satrow .ct{ margin-left:auto; color:#8fa383; font-variant-numeric:tabular-nums; }
+  .satrow.sel{ background:rgba(150,200,120,.14); color:#eef6da; }
+  .satrow.ro{ font-style:italic; color:#9fb891; }
+  #satchelEmpty{ color:#7e9a6c; font-style:italic; padding:2px 6px; }
+  #satchelExamine{
+    margin-top:9px; padding-top:8px; border-top:1px solid rgba(150,200,120,.15);
+    font-family:Palatino, Georgia, serif; font-style:italic; font-size:11.5px; line-height:1.5;
+    color:#cde0b6; white-space:pre-wrap; max-height:56vh; overflow-y:auto;
+  }
   #fps{ position:absolute; bottom:10px; right:14px; font-size:10px; color:#5f7053; }
   #status{ position:absolute; left:-9999px; top:0; }
 </style>
@@ -121,6 +142,7 @@
   <div id="crosshair"></div>
   <div id="topleft" class="panel">
     <div id="clock">06:00</div>
+    <div id="wx"></div>
     <div id="district">—</div>
     <div id="envline">air <span id="airtemp">31</span>°C · alt <span id="alt">0</span>m · <span id="cover">shaded</span></div>
     <div id="heatlabel">BODY HEAT</div>
@@ -136,6 +158,11 @@
     <div id="missionTitle" style="color:#e8d98a; letter-spacing:.08em;">—</div>
     <div id="missionProg" style="color:#b9c8aa; font-size:11px; margin-top:2px;"></div>
     <div id="trialTimer" style="color:#8affd0; font-size:16px; margin-top:5px; letter-spacing:.14em; font-variant-numeric:tabular-nums; display:none;">--:--</div>
+  </div>
+  <div id="satchel" class="panel">
+    <div id="satchelHead">SATCHEL <span>— I to close · Tab to leaf through</span></div>
+    <div id="satchelList"></div>
+    <div id="satchelExamine"></div>
   </div>
   <div id="fps"></div>
 </div>
@@ -159,8 +186,8 @@
       <div><b>Shift</b> run</div><div><b>Space</b> jump</div>
       <div><b>W into vines</b> climb (look up/down)</div><div><b>T</b> hold to pass time</div>
       <div><b>E</b> talk / take an errand</div><div><b>F</b> flashlight</div>
-      <div><b>M</b> sound on/off</div><div><b>R</b> return to shade</div>
-      <div><b>Esc</b> pause</div>
+      <div><b>I</b> satchel</div><div><b>M</b> sound on/off</div>
+      <div><b>R</b> return to shade</div><div><b>Esc</b> pause</div>
     </div>
     <div class="go" id="goLabel">CLICK TO WAKE</div>
     <div class="tiny">runs locally · procedural &amp; endless · headphones recommended</div>
@@ -176,6 +203,9 @@
 <script src="entities.js"></script>
 <script src="player.js"></script>
 <script src="main.js"></script>
+<script src="inventory.js"></script>
+<script src="puzzles.js"></script>
+<script src="weather.js"></script>
 <script src="story.js"></script>
 </body>
 </html>

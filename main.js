@@ -52,6 +52,19 @@ function nearestGiantTrunk() {
   }
   return best;
 }
+// Ladders: nearest waytree lookout deck among resident chunks (pure-hash recompute, no build).
+// Used by the VANTAGE errand as its preferred forgiving vantage. Returns {x,z,y} or null.
+function nearestWaytreeLookout(minD) {
+  if (typeof waytreeSpec !== 'function') return null;
+  let best = null, bd = 1e9;
+  for (const c of chunks.values()) {
+    const w = waytreeSpec(c.ix, c.iz);
+    if (!w) continue;
+    const d = dist2(w.x, w.z, player.pos.x, player.pos.z);
+    if (d > (minD || 0) && d < bd) { bd = d; best = { x: w.x, z: w.z, y: w.deckY }; }
+  }
+  return best;
+}
 function nearestOpenRect() {
   let best = null, bd = 1e9;
   for (const c of chunks.values()) {
@@ -103,15 +116,22 @@ function acceptMission(arch) {
     msg('A woman folds a parcel in waxcloth: “Take this to my sister in ' + d.name + '. She’ll be watching the road.”', 7);
   };
   if (arch === ARCH.VANTAGE) {
+    // Ladders: a resident waytree lookout is the preferred vantage (a friendly ladder climb).
+    const way = nearestWaytreeLookout(14);
     const roof = nearestRooftop(26), trunk = nearestGiantTrunk();
-    let t = roof, viaTrunk = false;
-    if (trunk && (!roof || dist2(trunk.x, trunk.z, player.pos.x, player.pos.z) < dist2(roof.x, roof.z, player.pos.x, player.pos.z))) { t = trunk; viaTrunk = true; }
+    let t = roof, kind = 'roof';
+    if (trunk && (!roof || dist2(trunk.x, trunk.z, player.pos.x, player.pos.z) < dist2(roof.x, roof.z, player.pos.x, player.pos.z))) { t = trunk; kind = 'trunk'; }
+    if (way) { t = way; kind = 'way'; }                    // the waytree wins when one is in range
     if (!t) buildErrand();
     else {
       m.target = { x: t.x, z: t.z, y: t.y };
-      m.summit = viaTrunk ? { halfX: t.radius, halfZ: t.radius, topY: t.y } : { halfX: t.halfX, halfZ: t.halfZ, topY: t.y };
+      m.summit = kind === 'way' ? { halfX: 2.8, halfZ: 2.8, topY: t.y }
+        : kind === 'trunk' ? { halfX: t.radius, halfZ: t.radius, topY: t.y }
+          : { halfX: t.halfX, halfZ: t.halfZ, topY: t.y };
       m.title = 'Reach the high roost';
-      msg('An elder points a long finger up: “Climb the tall one yonder, and tell me the green still runs to every edge.”', 7);
+      msg(kind === 'way'
+        ? 'An elder points a long finger up: “There is a waytree yonder — take the rungs to the lookout, and tell me the green still runs to every edge.”'
+        : 'An elder points a long finger up: “Climb the tall one yonder, and tell me the green still runs to every edge.”', 7);
     }
   } else if (arch === ARCH.SUNRUN) {
     const t = nearestOpenRect() || nearestRooftop(26);
@@ -531,8 +551,13 @@ function startTrial(id, tierIdx, tm) {
     T.phase = 'gate'; T.timeLeft = 999; T.obj = 'Reach the start gate on the deck';
     startMsg('Reach the deck, then run three spans down the line — hit each checkpoint before its clock empties. Fall off the deck and you fail.');
   } else if (id === TRIAL.ASCENT) {
+    // Ladders: a waytree lookout in range is the preferred climb (the time budget is the
+    // challenge, not the finger-work). Fall back to the colossus, then the Spire beacon.
+    const cx = Math.floor(p.pos.x / CHUNK), cz = Math.floor(p.pos.z / CHUNK);
+    const way = (typeof nearestWaytree === 'function') ? nearestWaytree(cx, cz, 4, 0) : null;
     const col = nearestChunkOfType('colossus', 8);
-    if (col) { const ox = col.ix * CHUNK, oz = col.iz * CHUNK; T.target = { x: ox + 32, z: oz + 32, y: 56.5 }; T.baseY = 2; }
+    if (way) { T.target = { x: way.x, z: way.z, y: way.y }; T.baseY = 0; }
+    else if (col) { const ox = col.ix * CHUNK, oz = col.iz * CHUNK; T.target = { x: ox + 32, z: oz + 32, y: 56.5 }; T.baseY = 2; }
     else { T.target = { x: SPIRE.x + 6, z: SPIRE.z + 6, y: SPIRE.h + 10 }; T.baseY = 0; }
     const horiz = dist2(p.pos.x, p.pos.z, T.target.x, T.target.z);
     T.timeLeft = (T.target.y / 1.05 + horiz / SPRINT_EFF()) * 1.7 * mult;
@@ -823,6 +848,41 @@ function drawMinimap() {
   if (typeof archivist !== 'undefined' && archivist && typeof story !== 'undefined' && story.ch <= 7) {
     mmx.fillStyle = '#ffb04a';
     mmx.beginPath(); mmx.arc(archivist.g.position.x - px, archivist.g.position.z - pz, 3, 0, 7); mmx.fill();
+  }
+  // The Tinker (Ciphers giver) — a copper dot once met. Never a solution marker; the caches stay
+  // marker-less by design. (Cross-file guards: puzzles.js loads after main.js.)
+  if (typeof ciphTinker !== 'undefined' && ciphTinker && typeof ciph !== 'undefined' && ciph.met) {
+    mmx.fillStyle = '#e0a05a';
+    mmx.beginPath(); mmx.arc(ciphTinker.g.position.x - px, ciphTinker.g.position.z - pz, 3, 0, 7); mmx.fill();
+  }
+  // Gardener's Mantle reward: faint oddity ticks (fern circles, chime poles) on resident chunks —
+  // the world opens up for the collector. Cheap: reads already-built colData only.
+  if (typeof ciphMantle !== 'undefined' && ciphMantle) {
+    mmx.fillStyle = 'rgba(150,220,150,0.5)';
+    for (const c of chunks.values()) {
+      const cd = c.colData; if (!cd) continue;
+      const marks = (cd.ferns && cd.ferns.length ? cd.ferns : null) || (cd.chimes && cd.chimes.length ? cd.chimes : null);
+      if (!marks) continue;
+      const mx0 = marks[0].x - px, mz0 = marks[0].z - pz;
+      if (Math.abs(mx0) > 190 || Math.abs(mz0) > 190) continue;
+      mmx.fillRect(mx0 - 1.5, mz0 - 1.5, 3, 3);
+    }
+  }
+  // Ladders: waytree lookouts in resident chunks — a tiny rung glyph, once the player has
+  // stood on any lookout (pure-hash recompute; cheap; skipped until the mechanic is met).
+  if (seen.lookout && typeof waytreeSpec === 'function') {
+    mmx.strokeStyle = 'rgba(210,180,120,0.7)'; mmx.lineWidth = 1.2;
+    for (const c of chunks.values()) {
+      const w = waytreeSpec(c.ix, c.iz);
+      if (!w) continue;
+      const gx = w.x - px, gz = w.z - pz;
+      if (Math.abs(gx) > 190 || Math.abs(gz) > 190) continue;
+      mmx.beginPath();                                    // two rails + a rung = a ladder tick
+      mmx.moveTo(gx - 1.6, gz - 2.4); mmx.lineTo(gx - 1.6, gz + 2.4);
+      mmx.moveTo(gx + 1.6, gz - 2.4); mmx.lineTo(gx + 1.6, gz + 2.4);
+      mmx.moveTo(gx - 1.6, gz); mmx.lineTo(gx + 1.6, gz);
+      mmx.stroke();
+    }
   }
   // summited vantages — faint pins that persist
   mmx.fillStyle = 'rgba(180,210,120,0.55)';
@@ -1136,7 +1196,7 @@ function loop() {
 
   // time of day
   const timeScale = keys.KeyT ? 60 : 1;
-  dayT = (dayT + dt * timeScale / DAY_LEN) % 1;
+  if (!SHOT) dayT = (dayT + dt * timeScale / DAY_LEN) % 1;   // shots hold the preset hour (deterministic frames)
 
   const active = started || SHOT;
   let climbTouch = null;
@@ -1150,6 +1210,14 @@ function loop() {
   sun.target.position.set(sx, 0, sz);
   sun.target.updateMatrixWorld();
   updateSky(dayT, dt);
+  // Weather re-tints sun/hemi/fog *after* the sky has set them, so no updateSky edit is
+  // needed. Inert in SHOT mode (WX stays neutral) so screenshots stay pixel-stable.
+  if (!SHOT && typeof updateWeather === 'function') updateWeather(dt, time);
+  if (typeof WX !== 'undefined') {
+    sun.intensity *= WX.sunMul;
+    hemi.intensity = hemi.intensity * WX.sunMul + WX.flash;   // + lightning flash on top
+    sun.intensity += WX.flash * 0.5;
+  }
   updateLampLights();
 
   // flashlight ramps smoothly toward on/off when toggled
@@ -1166,8 +1234,12 @@ function loop() {
   sea.visible = seaReveal > 0.02;
   seaMat.opacity = seaReveal;
   sea.position.set(player.pos.x, 26.5, player.pos.z);
-  scene.fog.far = lerp(215, 580, high);
-  scene.fog.near = lerp(18, 90, high);
+  // Weather thickens the fog (dust storm / rain) via WX multipliers; min-clamped so the
+  // world never fully vanishes. Safe-defaulted to 1 when weather.js is absent.
+  const _fogFarMul = (typeof WX !== 'undefined') ? WX.fogFarMul : 1;
+  const _fogNearMul = (typeof WX !== 'undefined') ? WX.fogNearMul : 1;
+  scene.fog.far = Math.max(22, lerp(215, 580, high) * _fogFarMul);
+  scene.fog.near = Math.max(8, lerp(18, 90, high) * _fogNearMul);
 
   updateDrifters(time, player.pos.x, player.pos.y, player.pos.z);
   if (active) updateNPCs(dt, time);
@@ -1192,6 +1264,10 @@ function loop() {
         once('weavewalk', () => msg('The Weave. A raft of woven leaves holds you up; the streets are a green blur far below.', 7));
       else if (L === 'nest')
         once('nestwalk', () => msg('A crown nest, alone in the open sky. Someone climbs all the way up here to tend the glow-gardens.', 8));
+      else if (L === 'lookout') {                        // Ladders: standing on a waytree deck/rest platform
+        seen.lookout = true;                             // unlocks the minimap rung glyph for the session
+        once('lookoutwalk', () => msg('A waytree lookout — deck, railing, a lamp for the dark. The rungs belong to everyone; the view belongs to whoever climbs.', 8));
+      }
       else once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
     }
     if (nightF > 0.6) once('night', () => { msg('Night. The glow-moss wakes, and the fireflies with it.', 7); hint('The lamps still hum — press F for your flashlight', 6); });
@@ -1240,6 +1316,12 @@ function loop() {
     // no trial/errand is live. Objective priority is trial > errand > story > SPIRE — enforced inside
     // updateStory, which only writes activeObjective/HUD when no trial or errand is active.
     if (!SHOT && typeof updateStory === 'function') updateStory(dt, time);
+    // The Satchel (Part 1): syncs the journal-page props over resident chunks and the pickup
+    // candidate. Reads already-resident colData only; never in SHOT. One loop call total.
+    if (!SHOT && typeof updateInventory === 'function') updateInventory(dt, time);
+    // The Gardeners' Ciphers (Part 2): the Tinker, the five caches, the vault. After inventory so
+    // its props/hints sit atop the frame; never in SHOT (no Tinker, no props, no updates).
+    if (!SHOT && typeof updatePuzzles === 'function') updatePuzzles(dt, time);
 
     // abandon a trial by holding G (hint given in the start message) — never soft-locks
     if (trial) {

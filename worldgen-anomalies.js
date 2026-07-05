@@ -81,6 +81,9 @@ function addFallen(B, colData, mini, rng, ox, oz) {
     const t = 0.2 + rng() * 0.7, cxp = lerp(baseX, topX, t), czp = lerp(baseZ, topZ, t), cyp = lerp(1.5, topY, t);
     addCurtain(B, rng, cxp - 2, cyp, czp, cxp + 2, cyp, czp);
   }
+  // Ladders: hand back the anchor for a ground→roof ladder on the standing tower's east
+  // face (clear of the ramp on the south). Built later so its rng never shifts this chunk.
+  return { x: sx + w / 2 + 0.2, z: sz, y1: h, nx: 1, nz: 0 };
 }
 
 // TIER 1 — sinkhole: the block interior caved into a bowl. A per-chunk `pit` descriptor
@@ -967,13 +970,14 @@ function buildChunk(ix, iz) {
   const vd = clamp((REG.verdancy - 0.51) / 0.21, -1, 1);   // −1..1 across the canopy band (micro-drift)
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
-  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [],
+  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [], ladders: [],
     // Ambient-vignette anchors (Life pass): discovered at build time, driven at runtime by
     // pooled overlays in entities.js. All optional, all cheap; queried O(near) per frame.
     smokes: [], stallAnchors: [], bannerAnchors: [], swingAnchors: [], dripAnchors: [] };
   const mini = { rects: [], trees: [], type };
   const extraMeshes = [];   // non-batched meshes (e.g. reservoir water plane)
   let openRect = null; // area open to the sky at ground level
+  let fallenLadder = null;  // Ladders: fallen-tower ladder anchor (built late, RNG-stable)
 
   /* ---- street trees along west (x=ox) and south (z=oz) borders ---- */
   // Regions: skip rate + spacing drive street-tree density. scorch kills ~75% (survivors are
@@ -1193,7 +1197,7 @@ function buildChunk(ix, iz) {
   } else if (type === 'colossus') {
     addColossus(B, colData, mini, rng, ox, oz);
   } else if (type === 'fallen') {
-    addFallen(B, colData, mini, rng, ox, oz);
+    fallenLadder = addFallen(B, colData, mini, rng, ox, oz);
   } else if (type === 'sinkhole') {
     addSinkhole(B, colData, mini, rng, ox, oz);
   } else if (type === 'reservoir') {
@@ -1323,6 +1327,20 @@ function buildChunk(ix, iz) {
     }
     mini.oasis = { x: sx, z: sz };              // minimap: an oasis dot in the tan (drawn like the hamlet hut)
   }
+
+  /* ---- Ladders (Ladders feature): waytree lookouts + the two big structure climbs.
+          Built LAST — after every other rng-consuming pass — so their rng draws can never
+          shift any other chunk feature. Non-ladder chunks are byte-identical to before;
+          a waytree/ladder chunk differs only by the added geometry at the tail. Waytree
+          existence + position come straight from waytreeSpec so finders recompute them. ---- */
+  if (type === 'spire') {
+    // south-face run, ground to summit — stacked segments + rest platforms (addLadder, H=78)
+    addLadder(B, colData, rng, SPIRE.x, SPIRE.z + SPIRE.size / 2 + 0.2, 0, SPIRE.h, 0, 1);
+  } else if (type === 'fallen' && fallenLadder) {
+    addLadder(B, colData, rng, fallenLadder.x, fallenLadder.z, 0, fallenLadder.y1, fallenLadder.nx, fallenLadder.nz);
+  }
+  const _wt = waytreeSpec(ix, iz);
+  if (_wt) addWaytree(B, colData, mini, rng, _wt.x, _wt.z, _wt.deckY);
 
   /* ---- assemble ---- */
   const group = new THREE.Group();
