@@ -970,7 +970,7 @@ function buildChunk(ix, iz) {
   const vd = clamp((REG.verdancy - 0.51) / 0.21, -1, 1);   // −1..1 across the canopy band (micro-drift)
   const ox = ix * CHUNK, oz = iz * CHUNK;
   const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
-  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [], ladders: [],
+  const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [], ladders: [], lifts: [],
     // Ambient-vignette anchors (Life pass): discovered at build time, driven at runtime by
     // pooled overlays in entities.js. All optional, all cheap; queried O(near) per frame.
     smokes: [], stallAnchors: [], bannerAnchors: [], swingAnchors: [], dripAnchors: [] };
@@ -1340,7 +1340,7 @@ function buildChunk(ix, iz) {
     addLadder(B, colData, rng, fallenLadder.x, fallenLadder.z, 0, fallenLadder.y1, fallenLadder.nx, fallenLadder.nz);
   }
   const _wt = waytreeSpec(ix, iz);
-  if (_wt) addWaytree(B, colData, mini, rng, _wt.x, _wt.z, _wt.deckY);
+  if (_wt) addWaytree(B, colData, mini, rng, _wt.x, _wt.z, _wt.deckY, extraMeshes);   // Lifts: extraMeshes carries the moving platform group
 
   /* ---- assemble ---- */
   const group = new THREE.Group();

@@ -212,6 +212,19 @@ function removeNPC(npc) {
   if (npc === giver) giver = null;   // a giver culled at range: drop it, redesignate later
 }
 
+// Deliveries: promote the waiting errand receiver (a 'chat'-bodied {g, anim}) into the live crowd
+// the instant the parcel changes hands. She takes it (a shared-geo prop drops into her hand via the
+// pivoting arm), then jogs off with the 'depart' role below and corners out of sight. Parcel reuses
+// tplBox + npcPaperMat (no new material); it rides the arm group and is freed with the NPC (removeNPC
+// only scene.removes — shared geometry/material stay live for the crates/papers that also use them).
+function departReceiver(r) {
+  const parcel = new THREE.Mesh(tplBox, npcPaperMat); parcel.scale.set(0.22, 0.15, 0.16); parcel.position.set(0, -0.5, 0);
+  if (r.anim) r.anim.add(parcel);
+  npcs.push({ g: r.g, anim: r.anim, role: 'depart', axis: 0, line: 0, off: 0, kid: false,
+    dir: 1, speed: 3.1 + Math.random() * 0.4, phase: Math.random() * 7, turnCd: 2, stateT: 30,
+    greetCd: 1e9, faceYaw: r.g.rotation.y, partner: null, speaking: false, speakCd: 1e9, takeT: 1.15 });
+}
+
 // KIDS CHASING: two kid-scaled runners looping a fountain/plaza centre or a lamp post.
 function spawnChaseKids() {
   nearbyChunks(1, _nc);
@@ -369,6 +382,43 @@ function updateNPCs(dt, time) {
     } else if (n.role === 'tend') {
       n.g.scale.y = n.g.scale.x * (0.86 + Math.sin(time * 0.9 + n.phase) * 0.1);
       n.faceYaw += Math.sin(time * 0.15 + n.phase) * 0.003;
+    } else if (n.role === 'depart') {
+      // Deliveries: the errand receiver just took the parcel — a brief arm-out "take" beat facing
+      // the player, then she jogs off down the street, cornering away from the player each turn until
+      // the d>88 cull (or the 30 s stateT safety) retires her. Reuses the walk mover + chat-arm idioms.
+      if (n.takeT > 0) {
+        n.takeT -= dt;
+        n.faceYaw = Math.atan2(player.pos.x - n.g.position.x, player.pos.z - n.g.position.z);
+        if (n.anim) n.anim.rotation.x += (-1.05 - n.anim.rotation.x) * Math.min(1, 8 * dt);   // reach out to receive
+        if (n.takeT <= 0) {   // pick the getaway street (customer wander-off idiom); dir opens distance
+          n.axis = Math.random() < 0.5 ? 0 : 1;
+          n.line = 64 * Math.round((n.axis === 0 ? n.g.position.x : n.g.position.z) / 64);
+          n.off = (Math.random() < 0.5 ? -1 : 1) * (5.6 + Math.random() * 1.7);
+          n.dir = Math.sign(n.axis === 0 ? n.g.position.z - player.pos.z : n.g.position.x - player.pos.x) || 1;
+        }
+      } else {
+        moving = true;
+        const p = n.g.position;
+        if (n.axis === 0) { p.z += n.dir * n.speed * dt; p.x += (n.line + n.off - p.x) * Math.min(1, 2 * dt); }
+        else { p.x += n.dir * n.speed * dt; p.z += (n.line + n.off - p.z) * Math.min(1, 2 * dt); }
+        const along = n.axis === 0 ? p.z : p.x;
+        const grid = Math.round(along / CHUNK) * CHUNK;
+        if (Math.abs(along - grid) < 0.7 && n.turnCd <= 0) {
+          n.turnCd = 4 + Math.random() * 4;
+          if (Math.random() < 0.55) {   // corner onto the perpendicular street, re-picking dir away from the player
+            n.axis = 1 - n.axis; n.line = grid;
+            const cnl = isCanalLine(n.axis, Math.round(grid / 64));
+            n.off = (cnl || Math.random() < 0.75) ? (Math.random() < 0.5 ? -1 : 1) * (5.6 + Math.random() * 1.7) : (Math.random() - 0.5) * 4;
+            n.dir = Math.sign(n.axis === 0 ? p.z - player.pos.z : p.x - player.pos.x) || 1;
+          }
+        }
+        n.faceYaw = n.axis === 0 ? (n.dir > 0 ? 0 : Math.PI) : (n.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+        if (n.anim) n.anim.rotation.x += (-0.35 - n.anim.rotation.x) * Math.min(1, 8 * dt);   // hug the parcel while running
+      }
+      n.stateT -= dt;
+      // stuck-safety net, but never pop on-screen: retire on the budget only once she's past 40 m,
+      // otherwise grant a small extension (a chaser keeps her alive; the d>88 cull still ends it).
+      if (n.stateT <= 0) { if (d > 40) { removeNPC(n); continue; } else n.stateT = 5; }
     }
 
     // keep them out of cars, trunks, buildings

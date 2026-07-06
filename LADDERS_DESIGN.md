@@ -1,5 +1,9 @@
 # CANOPY — Waytrees, ladders & lookouts (forgiving mission climbing)
 
+> **Superseded in part by LIFTS_DESIGN.md:** waytrees no longer carry a ground→deck rung
+> ladder — they use a hand-cranked winch lift instead. Ladders remain on the Spire and
+> the fallen tower, and the ladder engine below is unchanged for those.
+
 Problem: freeclimbing (hold W facing vines/trunks, pitch steering, mantle timing) is
 too fiddly when a mission *requires* height. Fix: any climb the game *asks* you to make
 gets a **ladder** — and ladders use a locked-in climb mode, not freeclimb physics.

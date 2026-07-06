@@ -130,7 +130,7 @@ function acceptMission(arch) {
           : { halfX: t.halfX, halfZ: t.halfZ, topY: t.y };
       m.title = 'Reach the high roost';
       msg(kind === 'way'
-        ? 'An elder points a long finger up: “There is a waytree yonder — take the rungs to the lookout, and tell me the green still runs to every edge.”'
+        ? 'An elder points a long finger up: “There is a waytree yonder — ride the lift to the lookout, and tell me the green still runs to every edge.”'
         : 'An elder points a long finger up: “Climb the tall one yonder, and tell me the green still runs to every edge.”', 7);
     }
   } else if (arch === ARCH.SUNRUN) {
@@ -160,7 +160,7 @@ function acceptMission(arch) {
 
 function clearMissionMeshes() {
   for (const mm of LAMP_POOL) mm.visible = false;
-  if (activeMission && activeMission.receiver) { scene.remove(activeMission.receiver); activeMission.receiver = null; }
+  if (activeMission && activeMission.receiver) { scene.remove(activeMission.receiver.g); activeMission.receiver = null; }   // only if the errand ended WITHOUT delivery (fail/abandon); a delivered receiver is nulled first
 }
 function completeMission(goldLine) {
   if (goldLine) msg(goldLine, 9, true);
@@ -259,11 +259,18 @@ function updateMissions(dt, time) {
   } else if (m.arch === ARCH.ERRAND) {
     const d = dist2(p.pos.x, p.pos.z, m.target.x, m.target.z);
     if (!m.receiver && d < 55) {
-      const r = makeNPCGroup(false, 'tend').g;
-      r.position.set(m.target.x, 0, m.target.z); scene.add(r); m.receiver = r;
+      // Deliveries: spawn her with the chat/vendor arm rig so she can reach out & take the parcel on
+      // delivery — keep the whole {g, anim} pair (departReceiver needs the arm).
+      m.receiver = makeNPCGroup(false, 'chat');
+      m.receiver.g.position.set(m.target.x, 0, m.target.z); scene.add(m.receiver.g);
     }
-    if (m.receiver) m.receiver.rotation.y = Math.atan2(p.pos.x - m.target.x, p.pos.z - m.target.z);
-    if (d < 4 && m.receiver) completeMission('Delivered. Her sister folds a sprig of glow-moss into your palm — “safe roads, wanderer.”');
+    if (m.receiver) m.receiver.g.rotation.y = Math.atan2(p.pos.x - m.target.x, p.pos.z - m.target.z);
+    if (d < 4 && m.receiver) {
+      // Deliveries: hand her off to the live NPC crowd as a 'depart' walker (takes parcel, jogs away).
+      // Null m.receiver first so completeMission→clearMissionMeshes can't remove the now-departing NPC.
+      if (typeof departReceiver === 'function') { departReceiver(m.receiver); m.receiver = null; }
+      completeMission('Delivered. Her sister folds a sprig of glow-moss into your palm — “safe roads, wanderer.”');
+    }
   }
 }
 
@@ -952,12 +959,47 @@ const vignetteEl = document.getElementById('vignette');
 const fadeEl = document.getElementById('fade');
 const fpsEl = document.getElementById('fps');
 
+// Toast queue: exactly one .msg lives in #msgs; the rest wait FIFO behind it.
+// Hold = max(dur*1.25, reading-floor by length) so long story lines stay readable.
+// Dedupe drops a repeat of the shown toast or the queue tail (net-bounce /
+// water-crash lines re-fire). Pressure valve: while anything waits behind it, the
+// shown toast's fade is pulled in to max(shownAt+minHold, now+0.8s) if sooner than
+// its natural end, so a backlog drains instead of lagging — minHold 4s / 6s gold;
+// solo toasts keep full eff. Cap 6 waiting; when full drop the oldest non-gold
+// waiter (gold story beats never drop, and the newest is never lost).
+let msgQ = [], msgCur = null, msgTimer = 0, msgFading = false;
 function msg(text, dur, gold) {
+  if ((msgCur && msgCur.text === text) || (msgQ.length && msgQ[msgQ.length - 1].text === text)) return;
+  if (msgCur) {
+    if (msgQ.length >= 6) {
+      let i = msgQ.findIndex(e => !e.gold);   // oldest non-gold waiter
+      if (i < 0) { if (!gold) return; i = 0; } // all waiters gold: drop incoming non-gold, else oldest gold
+      msgQ.splice(i, 1);
+    }
+    msgQ.push({ text, dur, gold });
+    if (!msgFading) msgPressure();
+    return;
+  }
+  msgShow({ text, dur, gold });
+}
+function msgShow(e) {
   const d = document.createElement('div');
-  d.className = 'msg' + (gold ? ' gold' : '');
-  d.textContent = text;
-  msgsEl.appendChild(d);
-  setTimeout(() => { d.style.transition = 'opacity .8s'; d.style.opacity = 0; setTimeout(() => d.remove(), 850); }, (dur || 5) * 1000);
+  d.className = 'msg' + (e.gold ? ' gold' : '');
+  d.textContent = e.text; msgsEl.appendChild(d);
+  const eff = Math.max((e.dur || 5) * 1.25, 2.5 + 0.075 * e.text.length), now = perfNow();
+  msgCur = { text: e.text, gold: e.gold, div: d, shownAt: now, end: now + eff * 1000 };
+  msgFading = false; msgArm(msgCur.end);
+  if (msgQ.length) msgPressure();   // promoted into a standing backlog → hold only to floor
+}
+function msgArm(at) { clearTimeout(msgTimer); msgTimer = setTimeout(msgFade, Math.max(0, at - perfNow())); }
+function msgFade() {
+  const d = msgCur.div; msgFading = true;
+  d.style.transition = 'opacity .8s'; d.style.opacity = 0;
+  setTimeout(() => { d.remove(); msgCur = null; msgFading = false; if (msgQ.length) msgShow(msgQ.shift()); }, 850);
+}
+function msgPressure() {
+  const minHold = msgCur.gold ? 6000 : 4000, target = Math.max(msgCur.shownAt + minHold, perfNow() + 800);
+  if (target < msgCur.end) { msgCur.end = target; msgArm(target); }
 }
 let hintUntil = 0;
 function hint(text, dur) {
@@ -1266,7 +1308,7 @@ function loop() {
         once('nestwalk', () => msg('A crown nest, alone in the open sky. Someone climbs all the way up here to tend the glow-gardens.', 8));
       else if (L === 'lookout') {                        // Ladders: standing on a waytree deck/rest platform
         seen.lookout = true;                             // unlocks the minimap rung glyph for the session
-        once('lookoutwalk', () => msg('A waytree lookout — deck, railing, a lamp for the dark. The rungs belong to everyone; the view belongs to whoever climbs.', 8));
+        once('lookoutwalk', () => msg('A waytree skyhouse, high over the crowns — the leaf-sea rolls to every horizon below the rail. The lift-rope belongs to everyone; the view belongs to whoever cranks.', 8));
       }
       else once('canopywalk', () => msg('You are walking on the roof of the forest.', 6));
     }

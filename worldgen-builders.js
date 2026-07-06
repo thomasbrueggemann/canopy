@@ -57,7 +57,7 @@ function chunkType(ix, iz) {
    waytree lookout without building (or peeking) the chunk, and the builder in
    buildChunk places it from THIS SAME function, guaranteeing byte-identical
    geometry. Every third grove and every fourth park carries one.  Returns
-   null | { x, z, deckY }.  deckY ∈ [22,30).  Global (var) so it is callable
+   null | { x, z, deckY }.  deckY ∈ [42,50).  Global (var) so it is callable
    from the later-loaded gameplay files. */
 var waytreeSpec = function (ix, iz) {
   const t = chunkType(ix, iz);
@@ -66,7 +66,7 @@ var waytreeSpec = function (ix, iz) {
   if (!ok) return null;
   const x = ix * CHUNK + 20 + hash2(ix, iz, 7303) % 24;   // central-ish, inside the block
   const z = iz * CHUNK + 20 + hash2(ix, iz, 7305) % 24;
-  const deckY = 22 + hash2(ix, iz, 7304) % 8;             // canopy-height lookout, [22,30)
+  const deckY = 42 + hash2(ix, iz, 7304) % 8;             // Skyhouse: lookout towers over the crowns, [42,50)
   return { x, z, deckY };
 };
 // Nearest waytree deck to chunk (cx,cz) in a Chebyshev ring scan (pure recompute,
@@ -1391,52 +1391,119 @@ function addLadder(B, colData, rng, x, z, y0, y1, nx, nz) {
   colData.ladders.push({ x, z, y0, y1, nx, nz });
 }
 
-/* ---- Waytrees (Ladders feature) --------------------------------------------
-   A special mission tree: one thick tall trunk (existing addTree idiom → a
-   colData.trunks entry + canopy), a ground-to-deck rung ladder, and a treehouse
-   lookout at canopy height — a round plank deck (colData.pads, layer 'lookout',
-   the friendly vantage), visual-only railing posts + a small pitched roof on
-   posts over half the deck (the roof registers NO solid, so the deck stays sky-
-   open and valid as a vantage point), and a lamp at the rim (colData.lamps) so
-   the waytree glows at night as a navigation beacon. Position/height come from
-   waytreeSpec(ix,iz) so finders can recompute it. Called LAST in buildChunk so
-   its rng draws never shift other chunk content (RNG discipline). */
-function addWaytree(B, colData, mini, rng, x, z, deckY) {
-  const trunkH = deckY + 13;                                 // crown caps well ABOVE the deck so the
-  addTree(B, colData, mini, rng, x, z, trunkH, 9 + rng() * 2, { trunkR: 2.1, blobs: 5 });  // lookout stays open-sided (a real vantage)
-  // ladder up the +x face of the trunk, ground to deck
-  const lx = x + 2.4, lz = z;
-  addLadder(B, colData, rng, lx, lz, 0, deckY, 1, 0);
-  // round plank deck around the trunk at deck height
-  const r = 2.6;
+/* ---- Lifts (winch lift): a hand-cranked counterweight platform ---------------
+   Replaces the waytree ground→deck ladder. A static frame (two guide rails, a
+   crossbeam, a brass winch drum, a taut hoist rope, and a hanging stone counter-
+   weight) is batched into B.plain in world coords like every other builder. The
+   moving platform is a SEPARATE, standalone Batch baked with vertex colours and
+   reusing matPlain (the chunk's plain material) — ONE shared material, never a
+   per-lift one, because chunk disposal only disposes geometry, so a fresh material
+   would leak. That mesh rides in its own THREE.Group (default matrixAutoUpdate,
+   like the reservoir water plane) whose world y is driven each frame by
+   updateLifts in player.js. Registers a { x,z,r,y0,y1,y,v,mesh } row in
+   colData.lifts; player.js does the pump/decay/clamp + rider carry. */
+function addLift(B, colData, rng, extraMeshes, x, z, deckY) {
+  const px = x + 3.6, pz = z;                                // shaft on the +x side (the deck railing's gap)
+  const railTop = deckY + 1.8;
+  const wood = _c.copy(COL.wood).multiplyScalar(1.05 + rng() * 0.2).clone();
+  const brass = _c.copy(COL.rust).multiplyScalar(0.95 + rng() * 0.2).clone();
+  const rope = _c.copy(COL.deadwood).multiplyScalar(0.85 + rng() * 0.2).clone();
+  const stone = _c.copy(COL.rock).multiplyScalar(0.75).clone();
+  // two guide rails (thin tall boxes) + a crossbeam joining their tops
+  for (const s of [-1, 1]) B.plain.addGeo(tplBox, compose(px, 0, pz + s * 1.25, 0.1, railTop, 0.1), wood, 0.1, rng);
+  B.plain.addGeo(tplBoxC, compose(px, railTop, pz, 0.12, 0.12, 2.72), wood, 0.1, rng);
+  // winch drum under the crossbeam centre (short fat cylinder, axis along z) + a taut hoist rope to the ground
+  B.plain.addGeo(tplCyl, compose(px, railTop - 0.28, pz - 0.3, 0.26, 0.6, 0.26, Math.PI / 2, 0, 0), brass, 0.12, rng);
+  B.plain.addGeo(tplBox, compose(px, 0, pz, 0.04, railTop - 0.28, 0.04), rope, 0, rng);
+  // counterweight: a stone block on a second rope beside the +z rail, hanging at mid-height (static visual — do not animate)
+  const cwy = deckY * 0.5;
+  B.plain.addGeo(tplBox, compose(px, cwy, pz + 1.25, 0.04, railTop - 0.28 - cwy, 0.04), rope, 0, rng);
+  B.plain.addGeo(tplBoxC, compose(px, cwy, pz + 1.25, 0.42, 0.6, 0.42), stone, 0.12, rng);
+  // --- the moving platform: a standalone batch, local origin = platform TOP surface
+  // at y 0, centred on (0,0); the Group carries it to (px, lift.y, pz). ---
+  const pb = new Batch();
+  const plank = _c.copy(COL.wood).multiplyScalar(1.1 + rng() * 0.2).clone();
+  const post = _c.copy(COL.deadwood).clone();
+  pb.addGeo(tplCyl, compose(0, -0.22, 0, 1.15, 0.22, 1.15), plank, 0.1, rng);        // plank disc, top face at y 0
+  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]])
+    pb.addGeo(tplBox, compose(sx * 0.86, 0, sz * 0.86, 0.08, 0.6, 0.08), post, 0.1, rng);   // corner posts
+  for (const sz of [-1, 1])                                                          // low rail ring on the ±z (rail) sides only — ±x stays open to walk on/off
+    pb.addGeo(tplBoxC, compose(0, 0.52, sz * 1.0, 1.9, 0.06, 0.06), post, 0.1, rng);
+  for (const s of [-1, 1])                                                           // rope yoke rising to a hang point ~2 m up (the "hanging basket" read)
+    pb.addGeo(tplCyl, segMat(s * 0.9, 0, 0, 0, 2.0, 0, 0.03), rope, 0.05, rng);
+  const pmesh = pb.mesh(matPlain, true, true);
+  const group = new THREE.Group();
+  group.position.set(px, 0.28, pz);
+  if (pmesh) group.add(pmesh);
+  extraMeshes.push(group);
+  colData.lifts.push({ x: px, z: pz, r: 1.15, y0: 0.28, y1: deckY, y: 0.28, v: 0, mesh: group });
+}
+
+/* ---- Waytrees → Skyhouse (Skyhouse feature, supersedes the canopy-height lookout)
+   A special mission tree whose lookout now TOWERS over the crowns. The tree's own
+   crown caps ~6 m BELOW the deck (addTree → a colData.trunks entry + a canopy pad
+   that shades the lift ride); a bare mast-trunk (a second, thinner colData.trunks
+   entry, freeclimbable + sun-occluding) carries on up to the floor. On top sits the
+   skyhouse at deckY ∈ [42,50): a big plank deck (colData.pads, layer 'lookout', the
+   friendly vantage), diagonal support struts so it reads BUILT, a parapet, a FULL
+   pitched roof registering real shade (a no-layer pad → 0.75 sun attenuation, so the
+   roof is a genuine cool spot at the top of a sun-baked climb), and a beacon mast whose
+   glowing head (colData.lamps) reads across the whole night map. The ground→deck winch
+   lift (Lifts feature) is unchanged. Position/height come from waytreeSpec(ix,iz) so
+   finders can recompute it. Called LAST in buildChunk so its rng draws never shift
+   other chunk content (RNG discipline). */
+function addWaytree(B, colData, mini, rng, x, z, deckY, extraMeshes) {
+  // Skyhouse: the tree crown now tops out ~4–6 m BELOW the deck (addTree puts blobs at cy=h*0.92);
+  // h≥32 still lets addTree hang a crown nest in the foliage under the house — charming, kept.
+  addTree(B, colData, mini, rng, x, z, deckY - 6, 10 + rng() * 2, { trunkR: 2.1, blobs: 6 });
+  // Skyhouse: a bare mast-trunk continues from inside the crown up to the floor — sun-occluding AND
+  // freeclimbable (trunks with h>14 take the climb path), so purists can skip the lift entirely.
+  B.plain.addGeo(tplTrunk, compose(x, deckY - 7, z, 1.5, 8, 1.5, 0, rng() * 7, 0), COL.bark, 0.18, rng);
+  colData.trunks.push({ x, z, r: 1.5, h: deckY });
+  // Lifts: a hand-cranked counterweight lift on the +x face (replaces the ground→deck ladder)
+  addLift(B, colData, rng, extraMeshes, x, z, deckY);
+  // --- the skyhouse floor: a bigger plank disc (+ the faint grain disc idiom) ---
+  const r = 3.2;
   const plank = _c.copy(COL.wood).multiplyScalar(1.05 + rng() * 0.2).clone();
   const plankDk = _c.copy(COL.wood).multiplyScalar(0.6).clone();
   B.plain.addGeo(tplCyl, compose(x, deckY - 0.16, z, r, 0.3, r), plank, 0.12, rng);       // deck slab
   B.plain.addGeo(tplCyl, compose(x, deckY + 0.01, z, r, 0.02, r), plankDk, 0.1, rng);     // faint plank grain
-  colData.pads.push({ x, z, r: r - 0.2, y: deckY, layer: 'lookout' });                    // the vantage deck
-  // railing posts around the rim (visual only), gap on the ladder side (+x)
-  const posts = 12;
+  colData.pads.push({ x, z, r: 3.0, y: deckY, layer: 'lookout' });                        // the vantage deck
+  // Skyhouse: 5 diagonal support struts from the mast (~deckY−4) out to the deck rim — reads BUILT, not floating
+  const strut = _c.copy(COL.wood).multiplyScalar(0.8).clone();
+  for (let k = 0; k < 5; k++) {
+    const a = k / 5 * Math.PI * 2 + 0.3;
+    const ex = x + Math.cos(a) * (r - 0.25), ez = z + Math.sin(a) * (r - 0.25);
+    B.plain.addGeo(tplCyl, segMat(x, deckY - 4, z, ex, deckY - 0.25, ez, 0.1), strut, 0.1, rng);
+  }
+  // parapet: railing posts + rail caps around the rim, gap on the lift-dock side (+x)
+  const posts = 14;
   for (let k = 0; k < posts; k++) {
     const a = k / posts * Math.PI * 2;
-    if (Math.cos(a) > 0.72) continue;                        // leave the ladder mouth open
+    if (Math.cos(a) > 0.72) continue;                        // leave the lift dock open
     const px = x + Math.cos(a) * (r - 0.2), pz = z + Math.sin(a) * (r - 0.2);
-    B.plain.addGeo(tplCyl, compose(px, deckY, pz, 0.05, 0.82, 0.05), COL.deadwood, 0.1, rng);
+    B.plain.addGeo(tplCyl, compose(px, deckY, pz, 0.05, 0.9, 0.05), COL.deadwood, 0.1, rng);
     if (k % 2 === 0)                                         // top rail cap between posts
-      B.plain.addGeo(tplBoxC, compose(px, deckY + 0.8, pz, 0.06, 0.06, 0.06), COL.deadwood, 0.1, rng);
+      B.plain.addGeo(tplBoxC, compose(px, deckY + 0.88, pz, 0.06, 0.06, 0.06), COL.deadwood, 0.1, rng);
   }
-  // small pitched roof on four posts over half the deck — VISUAL ONLY (no solid).
-  const roofY = deckY + 2.3, rr = r * 0.72;
+  // Skyhouse: a FULL pitched roof on 6 posts that casts real shade (no-layer pad → 0.75 sun atten).
+  const roofY = deckY + 2.8, roofR = 3.3;
   const roofCol = srgb(0x5a3a28), gableCol = srgb(0x6b4630);
-  for (const [sx, sz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
-    const cx2 = x + sx * rr * 0.7, cz2 = z + sz * rr * 0.7;
-    B.plain.addGeo(tplCyl, compose(cx2, deckY, cz2, 0.05, roofY - deckY, 0.05), COL.wood, 0.1, rng);   // roof post
+  for (let k = 0; k < 6; k++) {                              // roof posts carrying the eaves
+    const a = k / 6 * Math.PI * 2 + 0.2;
+    const cx2 = x + Math.cos(a) * roofR * 0.92, cz2 = z + Math.sin(a) * roofR * 0.92;
+    B.plain.addGeo(tplCyl, compose(cx2, deckY, cz2, 0.06, roofY - deckY, 0.06), COL.wood, 0.1, rng);
   }
-  addGableRoof(B, x - rr, z - rr, x + rr, z + rr, roofY, roofCol, gableCol);
-  // beacon lamp at the deck rim (−x side, opposite the ladder), glows at night
-  const hx = x - r + 0.3, hz = z, hy = deckY + 2.0;
-  B.plain.addGeo(tplCyl, compose(hx, deckY, hz, 0.06, 2.0, 0.06), COL.lampPole, 0, rng);   // short lamp post
-  B.lamp.addGeo(tplBox, compose(hx, hy, hz, 0.32, 0.22, 0.32), srgb(0xfff1cf), 0, rng);    // glowing head
-  colData.lamps.push({ x: hx, z: hz, working: true, hx, hy, hz });
+  addGableRoof(B, x - roofR, z - roofR, x + roofR, z + roofR, roofY, roofCol, gableCol);
+  colData.pads.push({ x, z, r: 3.2, y: deckY + 2.9 });       // real shade: E ≈ 0.25 inside → body-heat burn ≈ 0 under the roof
+  // Skyhouse: a beacon mast from the ridge to a glowing head — reads across the night map (REPLACES the old rim lamp)
+  const rh = clamp(roofR * 0.9, 1.4, 4.5);                   // matches addGableRoof's ridge height (min(w,d)*0.45)
+  const ridgeY = roofY + rh, hy = deckY + 6.6;
+  B.plain.addGeo(tplCyl, compose(x, ridgeY, z, 0.06, deckY + 7 - ridgeY, 0.06), COL.lampPole, 0, rng);   // beacon mast
+  B.lamp.addGeo(tplBox, compose(x, hy, z, 0.34, 0.3, 0.34), srgb(0xfff1cf), 0, rng);                     // glowing head
+  colData.lamps.push({ x, z, working: true, hx: x, hy, hz: z });
+  const banner = _c.copy(COL.rust).multiplyScalar(1.1).clone();                                          // a small banner off the mast
+  B.plain.quad([x, hy - 0.85, z], [x + 0.85, hy - 0.72, z], [x + 0.85, hy - 0.16, z], [x, hy - 0.16, z], [0, 0, 1, 1], banner);
 }
 
 /* ---- power poles & sagging wires ---- */

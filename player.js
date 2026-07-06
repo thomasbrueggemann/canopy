@@ -10,6 +10,7 @@ const player = {
   pitch: 0,
   grounded: false, climbing: false, onCanopy: false, supportLayer: null,
   onLadder: null,                                         // Ladders: {lad} while latched to a rung ladder
+  onLift: null,                                           // Lifts: the winch-lift platform currently carrying the player (null off it)
   heat: 0, exposed: false, inPit: false, inWater: false,
   bob: 0, stride: 0,
   airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0,
@@ -27,6 +28,18 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM') toggleAudio();
   if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
   if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
+  // Lifts: Q cranks a winch lift up, C down. Discrete presses only — auto-repeat (holding) is
+  // ignored, so the climb is made of deliberate cranks. Target = the lift you're riding, else the
+  // nearest within reach (recalls a stranded platform from the deck or ground). e.repeat guard is
+  // the mechanic, not a nicety.
+  if ((e.code === 'KeyQ' || e.code === 'KeyC') && started && !e.repeat) {
+    const lf = nearestPumpableLift();
+    if (lf) {
+      lf.v = clamp(lf.v + (e.code === 'KeyQ' ? LIFT_PUMP : -LIFT_PUMP), -LIFT_VMAX, LIFT_VMAX);
+      sfxStep();   // a soft wooden clunk per crank (reuses the footstep synth)
+      once('lift', () => msg('A counterweight lift, rope waxed and true. Crank steady — the lookouts belong to everyone.', 8, true));
+    }
+  }
   // Satchel (inventory.js): I toggles it, Tab leafs through while open. preventDefault only when
   // the satchel owns the Tab (satchelCycle returns false when closed) so focus never leaves the canvas.
   if (e.code === 'KeyI' && started && typeof satchelToggle === 'function') satchelToggle();
@@ -84,7 +97,7 @@ function showOverlay(paused) {
 
 /* ---- collision helpers ---- */
 function collectColliders(px, pz, out) {
-  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0; out.pits.length = 0; out.waters.length = 0; out.ladders.length = 0;
+  out.solids.length = 0; out.trunks.length = 0; out.pads.length = 0; out.pits.length = 0; out.waters.length = 0; out.ladders.length = 0; out.lifts.length = 0;
   const cx = Math.floor(px / CHUNK), cz = Math.floor(pz / CHUNK);
   for (let dx = -1; dx <= 1; dx++) for (let dz = -1; dz <= 1; dz++) {
     const c = chunks.get(chunkKey(cx + dx, cz + dz));
@@ -95,14 +108,76 @@ function collectColliders(px, pz, out) {
     for (const pit of c.colData.pits) out.pits.push(pit);
     for (const w of c.colData.waters) out.waters.push(w);
     if (c.colData.ladders) for (const l of c.colData.ladders) out.ladders.push(l);
+    if (c.colData.lifts) for (const l of c.colData.lifts) out.lifts.push(l);
   }
 }
-const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [], ladders: [] };
+const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [], ladders: [], lifts: [] };
+
+/* ---- Lifts (winch lift): the hand-cranked counterweight platform -------------
+   Discrete Q/C presses pump a winch velocity (in player.onLift / the keydown
+   handler); the velocity decays so a climb is deliberate cranking, not a hold.
+   updateLifts advances every reachable platform each frame; the rider carry lives
+   in stepPlayer. Tuning constants together so the feel is one-knob adjustable:
+   Skyhouse bumped these up for the ~46 m over-the-crowns ride — steady cranking
+   sustains ~1.5–2 m/s so the longer climb docks in ~20–30 s, not ~40. */
+const LIFT_PUMP = 1.0;     // m/s added to platform velocity per crank press
+const LIFT_VMAX = 3.2;     // |v| clamp (m/s)
+const LIFT_DECAY = 1.4;    // exponential velocity decay (per second) — you must keep cranking
+const LIFT_SNAP = 0.05;    // dock/settle tolerance at either end
+// Advance every lift in the 3×3 (distant lifts can't be pumped, so skipping them is exact, not
+// an approximation). Called once per frame from stepPlayer, reaching BOTH the ladder-latched and
+// the normal path. Decay, integrate, then clamp/dock (a clamp zeroes v; a near-miss snaps exactly).
+function updateLifts(dt) {
+  const decay = Math.exp(-LIFT_DECAY * dt);
+  for (const lf of nearby.lifts) {
+    if (lf.v === 0) continue;                                  // parked — nothing to move
+    lf.v *= decay;
+    lf.y += lf.v * dt;
+    if (lf.v > 0 && lf.y > lf.y1 - LIFT_SNAP) { lf.y = lf.y1; lf.v = 0; }        // dock level with the deck
+    else if (lf.v < 0 && lf.y < lf.y0 + LIFT_SNAP) { lf.y = lf.y0; lf.v = 0; }   // settle at the foot
+    lf.mesh.position.y = lf.y;
+  }
+}
+// Pump target: the lift you're riding, else the nearest within 3.2 m horizontally (any height
+// difference — this is how you recall a stranded platform from the deck or the ground).
+function nearestPumpableLift() {
+  const p = player;
+  if (p.onLift) return p.onLift;
+  let best = null, bd = 3.2 * 3.2;
+  for (const lf of nearby.lifts) {
+    const dx = p.pos.x - lf.x, dz = p.pos.z - lf.z, hd2 = dx * dx + dz * dz;
+    if (hd2 < bd) { bd = hd2; best = lf; }
+  }
+  return best;
+}
+let liftHintT = 0, liftStillT = 0, liftRideHinted = false;
+// Proximity prompt (mirrors ladderProxTick): near a lift and not riding → teach the keys; or while
+// riding and stalled mid-shaft > 1 s → the same nudge once per ride, so nobody gets stranded.
+function liftProxTick(dt) {
+  const p = player;
+  if (p.onLift) {
+    const lf = p.onLift, mid = lf.y > lf.y0 + 0.1 && lf.y < lf.y1 - 0.1;
+    if (mid && Math.abs(lf.v) < 0.05) {
+      liftStillT += dt;
+      if (liftStillT > 1 && !liftRideHinted) { liftRideHinted = true; hint('the winch lift — step on · Q cranks up, C cranks down', 2.5); }
+    } else liftStillT = 0;
+    return;
+  }
+  liftStillT = 0; liftRideHinted = false;                      // reset for the next ride
+  liftHintT -= dt;
+  if (liftHintT > 0) return;
+  for (const lf of nearby.lifts) {
+    const dx = p.pos.x - lf.x, dz = p.pos.z - lf.z;
+    if (dx * dx + dz * dz < 9) { liftHintT = 2.5; hint('the winch lift — step on · Q cranks up, C cranks down', 2.5); return; }
+  }
+}
 
 function stepPlayer(dt) {
   const p = player;
   const feet = () => p.pos.y;
   const wasGrounded = p.grounded, wasClimbing = p.climbing;
+
+  updateLifts(dt);   // Lifts: advance every reachable platform first — reaches both the ladder-latched and normal paths
 
   // --- Ladder latch (Ladders feature): a locked-in climb mode, no facing cone, no
   // pitch tricks. Runs BEFORE the normal move/gravity/wind step and returns early, so the
@@ -133,6 +208,18 @@ function stepPlayer(dt) {
     if (p.shake > 0) { camera.position.x += (Math.random() - 0.5) * p.shake * 0.4; p.shake = Math.max(0, p.shake - dt * 2.6); }
     camera.rotation.set(p.pitch, p.yaw, 0, 'YXZ');
     return null;
+  }
+
+  // --- Lifts: rider carry. Runs before input/gravity so the platform carries the player exactly,
+  // up or down, with no falling-state flicker. Uses last frame's onLift (set in the support scan)
+  // and this frame's just-advanced lift.y. The vel.y <= 0.01 guard keeps a jump (Space, below) from
+  // being eaten; airPeakY tracks pos.y so a carried descent banks no fall damage. Walking or jumping
+  // off mid-ride is never locked — clearing onLift hands the consequence to the fall rules. ---
+  if (p.onLift) {
+    const lf = p.onLift, dx = p.pos.x - lf.x, dz = p.pos.z - lf.z;
+    if (dx * dx + dz * dz <= (lf.r + 0.15) * (lf.r + 0.15) && Math.abs(feet() - lf.y) < 1.2 && p.vel.y <= 0.01) {
+      p.pos.y = lf.y; p.vel.y = 0; p.airPeakY = p.pos.y;
+    } else p.onLift = null;
   }
 
   // input direction
@@ -237,9 +324,17 @@ function stepPlayer(dt) {
     if (dx * dx + dz * dz > pad.r * pad.r) continue;
     if (feet() >= pad.y - 1.3 && feet() <= pad.y + 0.6 && pad.y > support) { support = pad.y; supportIsCanopy = true; supportLayer = pad.layer || null; }
   }
+  // Lifts: the winch-lift platform is a support candidate exactly like a pad (canopy layer 'lift').
+  let supportLift = null;
+  for (const lf of nearby.lifts) {
+    const dx = p.pos.x - lf.x, dz = p.pos.z - lf.z;
+    if (dx * dx + dz * dz > lf.r * lf.r) continue;
+    if (feet() >= lf.y - 1.3 && feet() <= lf.y + 0.6 && lf.y > support) { support = lf.y; supportIsCanopy = true; supportLayer = 'lift'; supportLift = lf; }
+  }
   p.grounded = false;
   if (p.vel.y <= 0.01 && feet() <= support + 0.02) {
     p.pos.y = support; p.vel.y = 0; p.grounded = true; p.onCanopy = supportIsCanopy; p.supportLayer = supportLayer;
+    p.onLift = supportLayer === 'lift' ? supportLift : null;   // Lifts: remember the platform grounding us (carry reads it next frame)
   }
   if (p.pos.y < groundY) { p.pos.y = groundY; p.vel.y = 0; p.grounded = true; }
 
@@ -270,6 +365,7 @@ function stepPlayer(dt) {
   const bobY = (p.grounded ? Math.sin(p.bob * 2) * 0.042 * Math.min(1, hSpeed / 4) : 0);
 
   ladderProxTick(dt);   // Ladders: throttled "E — climb the ladder" prompt when one is close
+  liftProxTick(dt);     // Lifts: throttled "step on · Q up, C down" prompt near / stalled on a lift
 
   camera.position.set(p.pos.x, p.pos.y + EYE + bobY, p.pos.z);
   if (p.shake > 0) {
@@ -314,7 +410,7 @@ function ladderInteract() {
   p.pos.z = lad.z + lad.nz * 0.55;
   p.pos.y = clamp(p.pos.y, lad.y0, lad.y1);                 // pull the feet onto the span
   p.grounded = false; p.climbing = false;
-  once('ladder', () => msg('Waytrees. Someone keeps the rungs oiled — the lookouts belong to everyone.', 8, true));
+  once('ladder', () => msg('Someone bolted these rungs on and keeps them oiled — the high places belong to everyone.', 8, true));
   return true;
 }
 let ladderHintT = 0;
@@ -326,7 +422,7 @@ function ladderProxTick(dt) {
   if (!lad) return;
   ladderHintT = 1.5;                                        // throttle: at most one prompt every 1.5 s
   hint('E — climb the ladder', 2);
-  once('ladder', () => msg('Waytrees. Someone keeps the rungs oiled — the lookouts belong to everyone.', 8, true));
+  once('ladder', () => msg('Someone bolted these rungs on and keeps them oiled — the high places belong to everyone.', 8, true));
 }
 
 /* ---- fall consequences -----------------------------------------------------
@@ -334,7 +430,7 @@ function ladderProxTick(dt) {
    catch you. Hard ground / roofs / the viaduct deck / streets hurt: a 7–10 m drop
    staggers; over 10 m blacks you out — you wake in the last shade, hotter, and any
    Trial or errand in progress is lost. Normal jumps (a 3 m wall ≈ 4 m drop) are free. */
-const SAFE_LEAF = { weave: 1, nest: 1, bough: 1, net: 1, lookout: 1 };   // + tree-canopy pads (onCanopy, no layer tag); lookout decks/rest-platforms catch you
+const SAFE_LEAF = { weave: 1, nest: 1, bough: 1, net: 1, lookout: 1, lift: 1 };   // + tree-canopy pads (onCanopy, no layer tag); lookout decks/rest-platforms + lift platforms catch you
 function handleLanding(drop) {
   const p = player;
   // Sky nets (Feature B): a walkable net catches you from any height and springs you back —
