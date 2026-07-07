@@ -548,6 +548,121 @@ function makeGroundTexture() {
   return { map, bump, rough };
 }
 
+// Bark: a vertical-grain tonal MOTTLE (elongated soft blotches) does the heavy lifting, with
+// thin, numerous, irregular dark cracks laid over it — never a regular comb (which reads as
+// ribbing once it wraps a cylinder) and never bold wires. Albedo stays light so the per-tree
+// COL.bark vertex tint supplies the brown; bump/rough are replayed from the recorded marks
+// (no extra r()). Blotches wrap in x AND y, cracks in x, so the sheet tiles around and up.
+function makeBarkTexture() {
+  const S = 2;                                             // px scale vs the original 256-px sheet (close-up sharpness)
+  const W = 256 * S, H = 512 * S, r = mulberry32(4187);
+  const c = makeCanvas(W, H), x = c.getContext('2d');
+  const cBump = makeCanvas(W, H), xb = cBump.getContext('2d');
+  const cRough = makeCanvas(W, H), xr = cRough.getContext('2d');
+  x.fillStyle = '#e2dacb'; x.fillRect(0, 0, W, H);   // light base; vertex colour tints it brown
+  xb.fillStyle = '#8a8a8a'; xb.fillRect(0, 0, W, H);
+  xr.fillStyle = '#d8d8d8'; xr.fillRect(0, 0, W, H);
+  const WX = [-W, 0, W], WY = [-H, 0, H];
+  // 1) vertical-grain mottle — soft blobs stretched in y (bark runs vertically): one coarse
+  //    tier for tone plates, one fine tier for pore-scale variation (instead of hard speckle,
+  //    which reads as a burlap weave when the flashlight magnifies it)
+  const blobs = [];
+  for (let i = 0; i < 222; i++) {
+    const fine = i >= 72;
+    const bx = r() * W, by = r() * H, brx = (fine ? 3.5 + r() * 12 : 14 + r() * 46) * S, ely = 1.4 + r() * 1.6, dark = r() < 0.5,
+      a = fine ? 0.05 + r() * 0.09 : 0.09 + r() * 0.15;
+    blobs.push({ bx, by, brx, ely, dark, a });
+    for (const ox of WX) for (const oy of WY) {
+      if (Math.abs(bx + ox - W / 2) > W / 2 + brx * ely || Math.abs(by + oy - H / 2) > H / 2 + brx * ely) continue;
+      x.save(); x.translate(bx + ox, by + oy); x.scale(1, ely);
+      const g = x.createRadialGradient(0, 0, 1, 0, 0, brx);
+      g.addColorStop(0, dark ? `rgba(50,40,28,${a})` : `rgba(210,200,182,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(0, 0, brx, 0, 7); x.fill(); x.restore();
+    }
+  }
+  // 2) thin subtle vertical cracks (dark only) + a few deeper character cracks — irregular
+  //    spacing and broken length, wandering by two summed sines so none are parallel.
+  const cracks = [];
+  for (let i = 0; i < 30; i++) {
+    const sx = r() * W, y0 = r() * H, y1 = y0 + H * (0.12 + r() * 0.3), w = (1 + r() * 2.6) * S, a = 0.07 + r() * 0.09;
+    cracks.push({ sx, y0, y1, w, a, a1: (2 + r() * 5) * S, p1: 0.5 + r() * 1.4, ph1: r() * 7, a2: (0.5 + r() * 2.2) * S, p2: 2 + r() * 2.5, ph2: r() * 7,
+      dash: [(42 + r() * 50) * S, (16 + r() * 26) * S], dashOff: r() * 60 * S });
+  }
+  for (let i = 0; i < 4; i++) {
+    const sx = r() * W, y0 = r() * H, y1 = y0 + H * (0.22 + r() * 0.33), w = (2 + r() * 2.5) * S, a = 0.11 + r() * 0.09;
+    cracks.push({ sx, y0, y1, w, a, a1: (2 + r() * 6) * S, p1: 0.5 + r() * 1.4, ph1: r() * 7, a2: (0.5 + r() * 2) * S, p2: 2 + r() * 2.5, ph2: r() * 7, deep: 1,
+      dash: [(60 + r() * 60) * S, (20 + r() * 30) * S], dashOff: r() * 60 * S });
+  }
+  const fx = (f, yy) => f.sx + Math.sin(yy / H * f.p1 * 6.283 + f.ph1) * f.a1 + Math.sin(yy / H * f.p2 * 6.283 + f.ph2) * f.a2;
+  // cracks wrap in x AND y (y0/y1 may run past H; the WY copies close the loop) so the
+  // v-tile border gets no crack-free seam band. blur melts the strokes into the mottle;
+  // if the 2d context lacks filter support the lines just stay crisp.
+  const stroke = (ctx, f, style, lw, dx, blur) => {
+    ctx.filter = blur ? `blur(${blur}px)` : 'none';
+    for (const ox of WX) for (const oy of WY) {
+      ctx.strokeStyle = style; ctx.lineWidth = lw; ctx.lineCap = 'round';
+      ctx.setLineDash(f.dash); ctx.lineDashOffset = f.dashOff;
+      ctx.beginPath(); for (let yy = f.y0; yy <= f.y1; yy += 7 * S) ctx.lineTo(fx(f, yy) + ox + (dx || 0), yy + oy); ctx.stroke();
+    }
+    ctx.setLineDash([]); ctx.filter = 'none';
+  };
+  // fissures blend rather than draw: each is a wide faint smudge with a slightly firmer core,
+  // dashed in long broken runs so no line is continuous, plus a whisper of a lit ridge beside
+  // it — painted relief for the shaded side, where the bump map gets no directional light
+  for (const f of cracks) {
+    stroke(x, f, `rgba(52,42,30,${f.a * 0.4})`, f.w * 2.4, 0, 2 * S);
+    stroke(x, f, `rgba(46,36,26,${f.a})`, f.w, 0, 1 * S);
+    stroke(x, f, `rgba(238,228,208,${f.a * 0.3})`, Math.max(0.8, f.w * 0.7), f.w + 1.1 * S, 1 * S);
+  }
+  // 3) subtle horizontal flake breaks
+  for (let i = 0; i < 80; i++) {
+    const cx = r() * W, cy = r() * H, cw = (4 + r() * 11) * S, dark = r() < 0.65, a = 0.08 + r() * 0.12, lw = (0.7 + r() * 1.2) * S, dy = (r() - 0.5) * 2.5 * S;
+    x.filter = `blur(${S * 0.5}px)`;
+    for (const ox of WX) {
+      x.strokeStyle = dark ? `rgba(44,35,24,${a})` : `rgba(226,218,202,${a})`; x.lineWidth = lw;
+      x.beginPath(); x.moveTo(cx + ox, cy); x.lineTo(cx + ox + cw, cy + dy); x.stroke();
+    }
+    x.filter = 'none';
+  }
+  // 4) fine grain speckle — soft, sparse pores (kept faint; the fine mottle tier carries the grain)
+  for (let i = 0; i < 2400; i++) {
+    x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.04)' : 'rgba(255,248,236,0.035)';
+    const sz = (0.8 + r() * 1.4) * S;
+    x.beginPath(); x.arc(r() * W, r() * H, sz, 0, 7); x.fill();
+  }
+  // --- bump/rough replay (no extra r()): pore relief + cracks recess/roughen. Coarse plates
+  // stay OUT of the bump sheet — their metre-wide shallow gradients quantise into 8-bit gray
+  // steps, and each step boundary shades as a visible contour ring under a close light. The
+  // albedo mottle already carries the plate tone; bump only keeps short-range features. ---
+  for (const b of blobs) {
+    if (b.brx >= 26 * S) continue;   // fine pores only
+    for (const ox of WX) for (const oy of WY) {
+      if (Math.abs(b.bx + ox - W / 2) > W / 2 + b.brx * b.ely || Math.abs(b.by + oy - H / 2) > H / 2 + b.brx * b.ely) continue;
+      xb.save(); xb.translate(b.bx + ox, b.by + oy); xb.scale(1, b.ely);
+      const g = xb.createRadialGradient(0, 0, 1, 0, 0, b.brx);
+      g.addColorStop(0, `rgba(${b.dark ? 104 : 160},${b.dark ? 104 : 160},${b.dark ? 104 : 160},${b.a * 0.9})`); g.addColorStop(1, 'rgba(138,138,138,0)');
+      xb.fillStyle = g; xb.beginPath(); xb.arc(0, 0, b.brx, 0, 7); xb.fill(); xb.restore();
+    }
+  }
+  // softened relief (#5a/#72 vs the old #4a/#6a): under a grazing flashlight the deep strokes
+  // were reading as black slots
+  for (const f of cracks) { stroke(xb, f, f.deep ? '#646464' : '#7a7a7a', f.w + 0.5, 0, 1.5 * S); stroke(xr, f, '#eaeaea', f.w + 0.5, 0, 1.5 * S); }
+  // final whole-sheet blur on the bump map: bilinear magnification makes the bump derivative
+  // constant per texel, so up close every texel lights as a flat square (a burlap-weave grid).
+  // Smoothing keeps the relief but makes its gradients continuous. The source is first laid
+  // out 3×3-wrapped on a padded canvas so the blur kernel never sees an edge (no tile seams).
+  {
+    const M = 16 * S;
+    const t = makeCanvas(W + 2 * M, H + 2 * M), tt = t.getContext('2d');
+    for (const ox of WX) for (const oy of WY) tt.drawImage(cBump, ox + M, oy + M);
+    xb.filter = `blur(${S}px)`; xb.drawImage(t, -M, -M); xb.filter = 'none';
+  }
+  // no repeat here — the bark Batch bakes world-scale UV repeats per piece (Batch.uvWorld)
+  const map = canvasTex(c), bump = canvasTexLinear(cBump), rough = canvasTexLinear(cRough);
+  map.anisotropy = bump.anisotropy = rough.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  return { map, bump, rough };
+}
+
 function makeLeafTexture() {
   const S = 512, r = mulberry32(5150);   // 512 px + shaped leaves: crisp fronds at arm's length
   const c = makeCanvas(S, S), x = c.getContext('2d');
@@ -695,6 +810,7 @@ const texB = makeBuildingTextures();
 const texG = makeGroundTexture();
 const texGround = texG.map, texGroundBump = texG.bump, texGroundRough = texG.rough;
 const texLeaf = makeLeafTexture();
+const texBark = makeBarkTexture();
 const texVine = makeVineTexture();
 const texGrass = makeGrassTexture();
 const texSun = makeGlowSprite('rgba(255,255,255,1)', 'rgba(255,220,160,0.55)');
@@ -703,6 +819,13 @@ const texMoon = makeMoonTexture();
 
 /* ------------------------------------------------------------- materials -- */
 const matPlain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0 });
+// Tree bark: trunks/roots/limbs (batched through B.bark). Vertex colour still carries
+// the per-tree COL.bark tint + jitter; the map/bump/rough add fissured wood relief.
+const matBark = new THREE.MeshStandardMaterial({
+  vertexColors: true, map: texBark.map,
+  bumpMap: texBark.bump, bumpScale: 0.2,
+  roughnessMap: texBark.rough, roughness: 1, metalness: 0
+});
 const matBld = new THREE.MeshStandardMaterial({
   vertexColors: true, map: texB.map, emissiveMap: texB.emissive,
   emissive: srgb(0xffc27a), emissiveIntensity: 0,
@@ -863,7 +986,11 @@ const matNet = new THREE.MeshStandardMaterial({
 
 /* ------------------------------------------------------- geometry batching -- */
 class Batch {
-  constructor() { this.p = []; this.n = []; this.u = []; this.c = []; this.i = []; this.v = 0; }
+  // uvWorld (metres per texture tile, optional): rescale template UVs per piece so a tiled
+  // material keeps constant world-space texel density across giants and saplings. Assumes
+  // cylinder-style templates (u wraps the circumference, v runs the height); u repeats are
+  // rounded to an integer so the wrap seam still tiles, v tiles at 2×uvWorld (tall textures).
+  constructor(uvWorld) { this.p = []; this.n = []; this.u = []; this.c = []; this.i = []; this.v = 0; this.uvWorld = uvWorld || 0; }
   quad(a, b, c2, d, uv, col, colB) {
     // a,b,c2,d: [x,y,z] counter-clockwise; uv: [u0,v0,u1,v1]; col/colB: THREE.Color (colB = color at a,b edge)
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
@@ -887,12 +1014,19 @@ class Batch {
     const pos = geo.attributes.position, nor = geo.attributes.normal, uv = geo.attributes.uv;
     const nm = new THREE.Matrix3().getNormalMatrix(mat4);
     const v3 = new THREE.Vector3();
+    let uRep = 1, vRep = 1;
+    if (this.uvWorld) {
+      const e = mat4.elements;
+      const sx = Math.hypot(e[0], e[1], e[2]), sy = Math.hypot(e[4], e[5], e[6]), sz = Math.hypot(e[8], e[9], e[10]);
+      uRep = Math.max(1, Math.round(Math.PI * (sx + sz) / this.uvWorld));
+      vRep = Math.max(0.6, sy / (this.uvWorld * 2));
+    }
     for (let k = 0; k < pos.count; k++) {
       v3.fromBufferAttribute(pos, k).applyMatrix4(mat4);
       this.p.push(v3.x, v3.y, v3.z);
       v3.fromBufferAttribute(nor, k).applyMatrix3(nm).normalize();
       this.n.push(v3.x, v3.y, v3.z);
-      if (uv) this.u.push(uv.getX(k), uv.getY(k)); else this.u.push(0, 0);
+      if (uv) this.u.push(uv.getX(k) * uRep, uv.getY(k) * vRep); else this.u.push(0, 0);
       const j = jitter ? (1 - jitter + rng() * jitter * 2) : 1;
       this.c.push(color.r * j, color.g * j, color.b * j);
     }
@@ -918,6 +1052,8 @@ class Batch {
 }
 
 /* ------------------------------------------------------ geometry templates -- */
+// NOTE: radial segment count feeds Batch.addGeo's per-vertex colour jitter (one rng() per
+// vertex) — changing it re-rolls every chunk's downstream worldgen. Keep at 9.
 const tplTrunk = new THREE.CylinderGeometry(0.62, 1, 1, 9, 1, true); tplTrunk.translate(0, 0.5, 0);
 const tplRoot = new THREE.CylinderGeometry(0.35, 1, 1, 6, 1, true); tplRoot.translate(0, 0.5, 0);
 const tplBlob = new THREE.IcosahedronGeometry(1, 1);
@@ -944,7 +1080,7 @@ const LAMP_POOL = Array.from({ length: 8 }, () => {
 
 /* ------------------------------------------------------------- palettes -- */
 const COL = {
-  bark: srgb(0x5d4a38), barkDark: srgb(0x4a3a2c),
+  bark: srgb(0x8a7157), barkDark: srgb(0x6e5942),
   leafA: srgb(0x5a8f3c), leafB: srgb(0x7aa348), leafC: srgb(0x44702e), leafDry: srgb(0x9a8f45),
   moss: srgb(0x54683c),
   roof: srgb(0x5c5b52), roofGarden: srgb(0x4e6337),

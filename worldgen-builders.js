@@ -105,12 +105,12 @@ function addTree(B, colData, mini, rng, x, z, h, R, opts) {
   opts = opts || {};
   const tr = opts.trunkR || (0.55 + h * 0.028);
   // trunk
-  B.plain.addGeo(tplTrunk, compose(x, 0, z, tr, h * 0.97, tr, 0, rng() * 7, (rng() - 0.5) * 0.06), COL.bark, 0.18, rng);
+  B.bark.addGeo(tplTrunk, compose(x, 0, z, tr, h * 0.97, tr, 0, rng() * 7, (rng() - 0.5) * 0.06), COL.bark, 0.18, rng);
   // roots
   const nRoots = 3 + (rng() * 3 | 0);
   for (let k = 0; k < nRoots; k++) {
     const a = rng() * Math.PI * 2, rl = tr * (0.9 + rng() * 1.1);
-    B.plain.addGeo(tplRoot,
+    B.bark.addGeo(tplRoot,
       compose(x + Math.cos(a) * tr * 0.75, 0, z + Math.sin(a) * tr * 0.75, tr * 0.38, rl, tr * 0.38, Math.sin(a) * 0.5, 0, -Math.cos(a) * 0.5),
       COL.barkDark, 0.15, rng);
   }
@@ -177,7 +177,7 @@ function addLimb(B, colData, rng, x0, y0, z0, x1, y1, z1, r, opts) {
   }
   for (let k = 0; k < segs; k++) {
     const a = pts[k], b = pts[k + 1], rr = r * (1 - 0.12 * (k / segs));
-    B.plain.addGeo(tplCyl, segMat(a[0], a[1], a[2], b[0], b[1], b[2], rr), bark, 0.16, rng);
+    B.bark.addGeo(tplCyl, segMat(a[0], a[1], a[2], b[0], b[1], b[2], rr), bark, 0.16, rng);
     // mossy top strip (two-tone vertex colour via quad), normal facing up
     let hx = b[0] - a[0], hz = b[2] - a[2]; const hl = Math.hypot(hx, hz) || 1; hx /= hl; hz /= hl;
     const px2 = -hz, pz2 = hx, hw = rr * 0.9;
@@ -1306,38 +1306,207 @@ function addRoads(B, rng, ox, oz, canalX, canalZ) {
   }
 }
 
-/* ---- abandoned cars ---- */
+/* ---- abandoned cars: parametric wrecks (sedan / wagon / pickup / van) ----
+   The silhouette is a run of roofline "stations" [x, roofY, widthFrac] (front → rear). The
+   shell is stitched from quads: tapered tops, per-segment flanks, a tumblehome glasshouse
+   inset behind shoulder strips, nose/tail, and (pickup) an open bed with inner walls. Over
+   that go painted details — wheel wells, door seams + handles, pillars, lights, grille,
+   plates, rust patches — and prop geometry: bumpers, mirrors, hubcaps, antenna, exhaust,
+   roof racks. Deflated tires sag the body with a small pitch/roll. */
 function addCar(B, colData, rng, x, z, ang) {
+  // One draw from the world stream seeds a car-local stream: however the shell evolves
+  // (more panels, new variants), chunk worldgen after this call never re-rolls again.
+  rng = mulberry32((rng() * 0x100000000) >>> 0);
   const rot = (lx, lz) => [x + lx * Math.cos(ang) + lz * Math.sin(ang), -lx * Math.sin(ang) + lz * Math.cos(ang) + z];
+  /* palette */
+  const rusty = rng() < 0.4;
   const body = _c.copy(CAR_COLS[(rng() * CAR_COLS.length) | 0]).multiplyScalar(0.7 + rng() * 0.4).clone();
-  if (rng() < 0.4) body.lerp(COL.rust, 0.4 + rng() * 0.3);
+  if (rusty) body.lerp(COL.rust, 0.4 + rng() * 0.3);
   if (CUR_REG && CUR_REG.biome === 'scorch') body.lerp(COL.rust, 0.35);   // Regions: sun-baked cars rust brighter
-  const cabin = _c.copy(body).multiplyScalar(0.45).clone();
-  B.plain.addGeo(tplBox, compose(x, 0.32, z, 4.3, 0.78, 1.9, 0, ang, 0), body, 0.12, rng);
-  const [cx2, cz2] = rot(-0.35, 0);
-  B.plain.addGeo(tplBox, compose(cx2, 1.1, cz2, 2.3, 0.6, 1.7, 0, ang, 0), cabin, 0.08, rng);
-  for (const [wx, wz] of [[1.4, 0.85], [1.4, -0.85], [-1.4, 0.85], [-1.4, -0.85]]) {
-    const [px, pz] = rot(wx, wz);
-    B.plain.addGeo(tplWheel, compose(px, 0.32, pz, 0.33, 0.33, 0.24, 0, ang, 0), COL.tire, 0.05, rng);
+  const husk = rng() < 0.08;                                              // the odd burned-out shell
+  if (husk) body.copy(srgb(0x2b2723)).lerp(COL.rust, rng() * 0.3);
+  const grime = _c.copy(body).multiplyScalar(0.55).clone();               // sills fade dark
+  const glass = srgb(rng() < 0.2 || husk ? 0x14191b : 0x2b3a40).multiplyScalar(0.75 + rng() * 0.5);
+  const dark = srgb(0x232322), metal = srgb(0x55544f);
+  /* variant tables: stations [x, roofY, wFrac]; tGlass = glazed top runs; pickup's last run is the open bed */
+  const V = rng(), T = V < 0.45 ? 0 : V < 0.7 ? 1 : V < 0.85 ? 2 : 3;   // sedan / wagon / pickup / van
+  const pts = [
+    [[2.08, 0.86, 0.82], [1.9, 0.92, 0.86], [0.72, 1.0, 0.97], [0.26, 1.52, 0.94], [-0.88, 1.52, 0.94], [-1.42, 1.0, 0.97], [-2.08, 0.94, 0.85]],
+    [[2.08, 0.86, 0.82], [1.9, 0.92, 0.86], [0.72, 1.0, 0.97], [0.3, 1.5, 0.94], [-1.52, 1.48, 0.93], [-2.0, 1.0, 0.85]],
+    [[2.0, 0.9, 0.82], [1.78, 0.98, 0.88], [1.2, 1.04, 0.96], [0.75, 1.56, 0.92], [-0.3, 1.56, 0.92], [-0.35, 1.0, 0.96], [-2.05, 1.0, 0.88]],
+    [[1.95, 0.98, 0.85], [1.6, 1.06, 0.94], [1.05, 1.66, 0.96], [-1.8, 1.66, 0.94], [-1.98, 1.08, 0.86]],
+  ][T];
+  const tGlass = [[0, 0, 1, 0, 1, 0], [0, 0, 1, 0, 1], [0, 0, 1, 0, 1, 0], [0, 1, 0, 0]][T];
+  const open = T === 2 ? [0, 0, 0, 0, 0, 1] : null;
+  const roofSpan = [[0.26, -0.88], [0.3, -1.52], [0.75, -0.3], [1.05, -1.8]][T];
+  const wheelXs = [[1.38, -1.38], [1.38, -1.38], [1.3, -1.35], [1.25, -1.32]][T];
+  const seamXs = [[0.62, -0.44], [0.62, -0.44], [0.55], [1.0, -0.12]][T];
+  const mirX = [0.72, 0.72, 1.2, 1.6][T] + 0.15;                        // just ahead of the A-pillar base
+  /* stance: overall size jitter; deflated corners sag the body with a small pitch/roll */
+  const sL = 0.94 + rng() * 0.16, sW = 0.92 + rng() * 0.1, lift = rng() * 0.06;
+  const dfl = [rng() < 0.22, rng() < 0.22, rng() < 0.22, rng() < 0.22]; // F+z F-z R+z R-z
+  const pitch = ((dfl[2] + dfl[3]) - (dfl[0] + dfl[1])) * -0.016;
+  const roll = ((dfl[0] + dfl[2]) - (dfl[1] + dfl[3])) * -0.02;
+  const cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
+  const y0 = 0.4 + lift, belt = 1.0 + lift, w = 0.92 * sW, roofY = Math.max(...pts.map(p => p[1])) + lift;
+  const X = i => pts[i][0], Y = i => pts[i][1] + lift, W = i => pts[i][2] * w;
+  const cW = i => W(i) * 0.86;                                          // glasshouse tumblehome inset
+  const gW = i => (Y(i) > belt + 0.01 ? cW(i) : W(i));                  // width the roofline run uses
+  const n = pts.length - 1, xF = X(0), xR = X(n);
+  const WA = lx => {                                                    // flank half-width at any x
+    for (let i = 0; i < n; i++) if (lx <= X(i) && lx >= X(i + 1))
+      return W(i) + (W(i + 1) - W(i)) * (X(i) - lx) / (X(i) - X(i + 1) || 1);
+    return W(lx > 0 ? 0 : n);
+  };
+  const P = (lx, ly, lz) => {
+    lx *= sL;
+    const x2 = lx * cp - ly * sp, y2 = ly * cp + lx * sp;               // pitch, then roll
+    const y3 = y2 * cr - lz * sr, z3 = y2 * sr + lz * cr;
+    const [wx, wz] = rot(x2, z3);
+    return [wx, y3, wz];
+  };
+  const Q = (a, b, c, d, col, colB) => B.plain.quad(P(...a), P(...b), P(...c), P(...d), [0, 0, 1, 1], col, colB);
+  // Face helpers with verified windings. sideQ: wall strip on a z=zz plane (outward = sign of zz);
+  // noseQ/tailQ: quads on an x plane facing +x / -x.
+  const sideQ = (x0, x1, yLo, yHi0, yHi1, zz0, zz1, col, colB) => {     // x0 = front-more edge
+    if (zz0 > 0) Q([x1, yLo, zz1], [x0, yLo, zz0], [x0, yHi0, zz0], [x1, yHi1, zz1], col, colB);
+    else Q([x0, yLo, zz0], [x1, yLo, zz1], [x1, yHi1, zz1], [x0, yHi0, zz0], col, colB);
+  };
+  const noseQ = (xx, yLo, yHi, zA, zB, col, colB) => {                  // faces +x; zA < zB
+    Q([xx, yLo, zB], [xx, yLo, zA], [xx, yHi, zA], [xx, yHi, zB], col, colB);
+  };
+  const tailQ = (xx, yLo, yHi, zA, zB, col, colB) => {                  // faces -x; zA < zB
+    Q([xx, yLo, zA], [xx, yLo, zB], [xx, yHi, zB], [xx, yHi, zA], col, colB);
+  };
+  /* shell */
+  for (let i = 0; i < n; i++) {                        // roofline run: hood / screens / roof / trunk lid
+    if (open && open[i]) continue;
+    Q([X(i), Y(i), gW(i)], [X(i), Y(i), -gW(i)], [X(i + 1), Y(i + 1), -gW(i + 1)], [X(i + 1), Y(i + 1), gW(i + 1)], tGlass[i] ? glass : body);
   }
-  if (rng() < 0.5) { // moss / growth on the hood
-    const [mx, mz] = rot(1.2 + rng(), (rng() - 0.5) * 0.8);
-    const mr = 0.5 + rng() * 0.5;
-    B.leaf.addGeo(tplBlob, compose(mx, 0.75, mz, mr, mr * 0.5, mr, 0, rng() * 7, 0), COL.leafC, 0.2, rng);
+  for (let i = 0; i < n; i++) {                        // flanks follow the plan-view taper
+    sideQ(X(i), X(i + 1), y0, belt, belt, W(i), W(i + 1), body, grime);
+    sideQ(X(i), X(i + 1), y0, belt, belt, -W(i), -W(i + 1), body, grime);
   }
-  if (rng() < 0.55) { // a vine drape or two spilling over the roof/hood
-    const nd = 1 + (rng() < 0.4 ? 1 : 0);
-    for (let k = 0; k < nd; k++) {
-      const [dx0, dz0] = rot(-1.4 + rng() * 3, -0.8);
-      const [dx1, dz1] = rot(-1.4 + rng() * 3, 0.8);
-      const vcol = _c.copy(COL.vine).multiplyScalar(0.55 + rng() * 0.4).clone();
-      const dy = 1.05 + (rng() - 0.5) * 0.3;
-      B.vine.quad([dx0, dy, dz0], [dx1, dy, dz1], [dx1, dy - 0.9 - rng() * 0.5, dz1], [dx0, dy - 0.9 - rng() * 0.5, dz0], [0, 0, 1, 1], vcol);
+  for (let i = 0; i < n; i++) {                        // glasshouse + shoulder strips (belt → inset)
+    if (Y(i) <= belt + 0.01 && Y(i + 1) <= belt + 0.01) continue;
+    for (const s of [1, -1]) {
+      const g0 = Math.max(Y(i), belt + 0.06), g1 = Math.max(Y(i + 1), belt + 0.06);
+      if (s > 0) Q([X(i + 1), belt + 0.06, cW(i + 1)], [X(i), belt + 0.06, cW(i)], [X(i), g0, gW(i)], [X(i + 1), g1, gW(i + 1)], glass);
+      else Q([X(i), belt + 0.06, -cW(i)], [X(i + 1), belt + 0.06, -cW(i + 1)], [X(i + 1), g1, -gW(i + 1)], [X(i), g0, -gW(i)], glass);
+      if (s > 0) Q([X(i + 1), belt, W(i + 1)], [X(i), belt, W(i)], [X(i), belt + 0.06, cW(i)], [X(i + 1), belt + 0.06, cW(i + 1)], body);
+      else Q([X(i), belt, -W(i)], [X(i + 1), belt, -W(i + 1)], [X(i + 1), belt + 0.06, -cW(i + 1)], [X(i), belt + 0.06, -cW(i)], body);
     }
   }
-  const hw = Math.abs(Math.cos(ang)) * 2.15 + Math.abs(Math.sin(ang)) * 0.95;
-  const hd = Math.abs(Math.sin(ang)) * 2.15 + Math.abs(Math.cos(ang)) * 0.95;
-  colData.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd, h: 1.35, vine: false });
+  noseQ(xF, y0, Y(0), -W(0), W(0), body, grime);
+  tailQ(xR, y0, Y(n), -W(n), W(n), body, grime);
+  Q([xF, y0 + 0.01, -w * 0.8], [xF, y0 + 0.01, w * 0.8], [xR, y0 + 0.01, w * 0.8], [xR, y0 + 0.01, -w * 0.8], dark); // underbody (faces down)
+  if (open) {                                          // pickup bed: floor, inward walls, rims
+    const bi = w * 0.96 - 0.12, bf = 0.78 + lift, bw = w * 0.96;
+    Q([-0.42, bf, bi], [-0.42, bf, -bi], [-1.95, bf, -bi], [-1.95, bf, bi], grime);         // floor (up)
+    Q([-0.42, bf, bi], [-1.95, bf, bi], [-1.95, belt, bi], [-0.42, belt, bi], grime);       // +z wall faces inward (-z)
+    Q([-1.95, bf, -bi], [-0.42, bf, -bi], [-0.42, belt, -bi], [-1.95, belt, -bi], grime);   // -z wall faces inward (+z)
+    noseQ(-1.95, bf, belt, -bi, bi, grime);                                                 // tailgate inner (faces cab)
+    tailQ(-0.42, bf, belt, -bi, bi, grime);                                                 // cab back inner (faces tailgate)
+    Q([-0.38, belt, bw], [-0.38, belt, bi], [-2.0, belt, bi], [-2.0, belt, bw], body);      // side rims (up)
+    Q([-0.38, belt, -bi], [-0.38, belt, -bw], [-2.0, belt, -bw], [-2.0, belt, -bi], body);
+    Q([-1.95, belt, bw], [-1.95, belt, -bw], [-2.05, belt, -bw], [-2.05, belt, bw], body);  // tailgate rim (up)
+  }
+  /* painted details (thin overlays nudged off the panel so they never z-fight) */
+  for (const wx of wheelXs) for (const s of [1, -1]) { // wheel wells: stepped dark arches
+    const zz = s * (WA(wx) + 0.013);
+    sideQ(wx + 0.48, wx - 0.48, y0 - 0.03, y0 + 0.24, y0 + 0.24, zz, zz, dark);
+    sideQ(wx + 0.3, wx - 0.3, y0 + 0.24, y0 + 0.36, y0 + 0.36, zz, zz, dark);
+  }
+  const seamCol = _c.copy(grime).multiplyScalar(0.7).clone();
+  for (const sx of seamXs) for (const s of [1, -1]) {  // door seams + handles
+    const zz = s * (WA(sx) + 0.016);
+    sideQ(sx + 0.012, sx - 0.012, y0 + 0.18, belt - 0.03, belt - 0.03, zz, zz, seamCol);
+    sideQ(sx - 0.12, sx - 0.28, belt - 0.15, belt - 0.115, belt - 0.115, zz, zz, metal);
+  }
+  {                                                    // pillars along the sloped glass edges + B-pillar
+    const pc = _c.copy(body).multiplyScalar(0.9).clone();
+    for (let i = 0; i < n; i++) {
+      const hi0 = Y(i) > belt + 0.01, hi1 = Y(i + 1) > belt + 0.01;
+      if (hi0 === hi1) continue;                       // only the rising / falling runs
+      for (const s of [1, -1]) {
+        const zi = s * (cW(i) + 0.012), zi1 = s * (cW(i + 1) + 0.012);
+        if (s > 0) Q([X(i + 1) - 0.05, belt + 0.05, zi1], [X(i) + 0.05, belt + 0.05, zi], [X(i) - 0.05, Y(i), zi], [X(i + 1) + 0.05, Y(i + 1), zi1], pc);
+        else Q([X(i) + 0.05, belt + 0.05, zi], [X(i + 1) - 0.05, belt + 0.05, zi1], [X(i + 1) + 0.05, Y(i + 1), zi1], [X(i) - 0.05, Y(i), zi], pc);
+      }
+    }
+    if (T < 2) {
+      const bx = (roofSpan[0] + roofSpan[1]) / 2, bz = w * 0.94 * 0.86 + 0.012;
+      sideQ(bx + 0.045, bx - 0.045, belt + 0.05, roofY - 0.02, roofY - 0.02, bz, bz, pc);
+      sideQ(bx + 0.045, bx - 0.045, belt + 0.05, roofY - 0.02, roofY - 0.02, -bz, -bz, pc);
+    }
+  }
+  {                                                    // face furniture: lights, grille, plate
+    const fx2 = xF + 0.014, ly = Y(0) - 0.16;
+    const lens = srgb(0xc8ccb8).multiplyScalar(rng() < 0.25 ? 0.35 : 0.6 + rng() * 0.35);
+    for (const s of [1, -1]) {
+      const zc = s * W(0) * 0.55;
+      noseQ(fx2, ly - 0.07, ly + 0.07, Math.min(zc - 0.14, zc + 0.14), Math.max(zc - 0.14, zc + 0.14), lens);
+    }
+    noseQ(fx2 - 0.002, ly - 0.06, ly + 0.06, -W(0) * 0.34, W(0) * 0.34, dark);              // grille
+    const rx2 = xR - 0.014, ry2 = Y(n) - 0.15, tl = srgb(0x83140e).multiplyScalar(0.5 + rng() * 0.35);
+    for (const s of [1, -1]) {
+      const zc = s * W(n) * 0.62;
+      tailQ(rx2, ry2 - 0.065, ry2 + 0.065, Math.min(zc - 0.12, zc + 0.12), Math.max(zc - 0.12, zc + 0.12), tl);
+    }
+    tailQ(rx2, ry2 - 0.36, ry2 - 0.23, -0.17, 0.17, srgb(0xa8a496).multiplyScalar(0.7 + rng() * 0.3));  // plate
+  }
+  if (rusty || husk) {                                 // rust blooms on the flanks
+    const np2 = 2 + (rng() * 3 | 0);
+    for (let k = 0; k < np2; k++) {
+      const s = rng() < 0.5 ? 1 : -1, px2 = -1.5 + rng() * 3;
+      const zz = s * (WA(px2) + 0.008 + k * 0.002);
+      const wq = 0.25 + rng() * 0.5, hq = 0.1 + rng() * 0.25, yc = y0 + 0.15 + rng() * (belt - y0 - 0.4);
+      const rc = _c.copy(COL.rust).multiplyScalar(0.7 + rng() * 0.5).lerp(body, 0.25).clone();
+      sideQ(px2 + wq, px2 - wq, yc, yc + hq, yc + hq, zz, zz, rc);
+    }
+  }
+  /* prop geometry (positions ride the sag transform so nothing floats off a tilted body) */
+  const G = (px, py, pz, sx, sy, sz, col, cyl) => {
+    const [gx, gy, gz] = P(px, py, pz);
+    B.plain.addGeo(cyl ? tplCyl : tplBoxC, compose(gx, gy, gz, sx, sy, sz, 0, ang, 0), col, 0.05, rng);
+  };
+  for (const ex of [xF + 0.02, xR - 0.02]) G(ex, 0.56 + lift, 0, 0.16, 0.18, w * 2 - 0.12, COL.tire);   // bumpers
+  for (const s of [1, -1]) G(mirX, belt + 0.14, s * (w + 0.08), 0.14, 0.08, 0.06, body);                // mirrors
+  if (rng() < 0.4) G(X(1) - 0.12, Y(1), w * 0.55, 0.014, 0.48, 0.014, dark, true);                      // antenna
+  if (rng() < 0.55) G(xR - 0.02, 0.16 + lift, -w * 0.45, 0.2, 0.05, 0.05, dark);                        // exhaust
+  if ((T === 1 || T === 3) && rng() < 0.35)                                                             // roof rack rails
+    for (const s of [1, -1]) G((roofSpan[0] + roofSpan[1]) / 2, roofY + 0.06, s * w * 0.55, (roofSpan[0] - roofSpan[1]) * 0.72, 0.05, 0.05, metal);
+  let wi2 = 0;
+  for (const wx of wheelXs) for (const s of [1, -1]) { // wheels + hubcaps (deflated ones squash)
+    const flat = dfl[wi2++], r = flat ? 0.26 : 0.34;
+    const [px, pz] = rot(wx * sL, s * (w - 0.06));
+    B.plain.addGeo(tplWheel, compose(px, r, pz, 0.34, r, 0.22, 0, ang, 0), COL.tire, 0.05, rng);
+    const [hx2, hz2] = rot(wx * sL, s * (w + 0.058));
+    B.plain.addGeo(tplWheel, compose(hx2, r, hz2, 0.13, 0.13, 0.02, 0, ang, 0), metal, 0.08, rng);
+  }
+  /* the forest takes them back */
+  if (rng() < 0.5) {                                   // moss on the hood
+    const [mx, mz] = rot((X(1) - 0.2 - rng() * 0.8) * sL, (rng() - 0.5) * 0.8);
+    const mr = 0.5 + rng() * 0.5;
+    B.leaf.addGeo(tplBlob, compose(mx, Y(1) + 0.06, mz, mr, mr * 0.5, mr, 0, rng() * 7, 0), COL.leafC, 0.2, rng);
+  }
+  if (open && rng() < 0.5) {                           // a shrub claims the pickup bed
+    const [mx, mz] = rot((-0.7 - rng() * 0.9) * sL, (rng() - 0.5) * 0.7);
+    const mr = 0.45 + rng() * 0.4;
+    B.leaf.addGeo(tplBlob, compose(mx, belt + 0.1, mz, mr, mr * 0.7, mr, 0, rng() * 7, 0), COL.leafB, 0.2, rng);
+  }
+  if (rng() < 0.55) {                                  // vine drapes over the roof
+    const nd = 1 + (rng() < 0.4 ? 1 : 0);
+    for (let k = 0; k < nd; k++) {
+      const lx = (roofSpan[1] + (roofSpan[0] - roofSpan[1]) * rng()) * sL;
+      const [dx0, dz0] = rot(lx, -w), [dx1, dz1] = rot(lx, w);
+      const vcol = _c.copy(COL.vine).multiplyScalar(0.55 + rng() * 0.4).clone();
+      B.vine.quad([dx0, roofY + 0.04, dz0], [dx1, roofY + 0.04, dz1], [dx1, roofY - 0.86 - rng() * 0.5, dz1], [dx0, roofY - 0.86 - rng() * 0.5, dz0], [0, 0, 1, 1], vcol);
+    }
+  }
+  const hw = Math.abs(Math.cos(ang)) * 2.15 * sL + Math.abs(Math.sin(ang)) * (w + 0.05);
+  const hd = Math.abs(Math.sin(ang)) * 2.15 * sL + Math.abs(Math.cos(ang)) * (w + 0.05);
+  colData.solids.push({ x0: x - hw, z0: z - hd, x1: x + hw, z1: z + hd, h: T >= 2 ? 1.7 : 1.55, vine: false });
 }
 
 /* ---- street lamps (some still alive) ---- */
@@ -1479,7 +1648,7 @@ function addWaytree(B, colData, mini, rng, x, z, deckY, extraMeshes) {
   addTree(B, colData, mini, rng, x, z, deckY - 6, 10 + rng() * 2, { trunkR: 2.1, blobs: 6 });
   // Skyhouse: a bare mast-trunk continues from inside the crown up to the floor — sun-occluding AND
   // freeclimbable (trunks with h>14 take the climb path), so purists can skip the lift entirely.
-  B.plain.addGeo(tplTrunk, compose(x, deckY - 7, z, 1.5, 8, 1.5, 0, rng() * 7, 0), COL.bark, 0.18, rng);
+  B.bark.addGeo(tplTrunk, compose(x, deckY - 7, z, 1.5, 8, 1.5, 0, rng() * 7, 0), COL.bark, 0.18, rng);
   colData.trunks.push({ x, z, r: 1.5, h: deckY });
   // Lifts: a hand-cranked counterweight lift on the +x face (replaces the ground→deck ladder)
   addLift(B, colData, rng, extraMeshes, x, z, deckY);

@@ -1255,9 +1255,14 @@ if (SHOT) {
     player.pos.set(Math.cos(spawnAngle) * spawnDist, 0, 30 + Math.sin(spawnAngle) * spawnDist);
     player.yaw = Math.PI; player.pitch = 0.04;
   }
-  // Dev/screenshot spawn override: ?px=&pz= drop the camera at chosen world coords (SHOT only).
+  // Dev/screenshot spawn override: ?px=&pz= drop the camera at chosen world coords (SHOT only);
+  // optional &py=&yaw=&pitch= for framing (defaults: ground, facing +z, near-level).
   const _spx = params.get('px'), _spz = params.get('pz');
-  if (_spx !== null && _spz !== null) { player.pos.set(+_spx, 0, +_spz); player.yaw = Math.PI; player.pitch = 0.04; }
+  if (_spx !== null && _spz !== null) {
+    player.pos.set(+_spx, +(params.get('py') || 0), +_spz);
+    player.yaw = params.get('yaw') !== null ? +params.get('yaw') : Math.PI;
+    player.pitch = params.get('pitch') !== null ? +params.get('pitch') : 0.04;
+  }
   ensureChunks(player.pos.x, player.pos.z, true);
   if (SHOT === '4') syncHamletResidents(0.016);   // residents in frame for the hamlet shot
   if (SHOT !== '2' && SHOT !== '4' && SHOT !== '5') { // a few citizens in frame

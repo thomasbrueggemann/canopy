@@ -29,7 +29,7 @@ function addColossus(B, colData, mini, rng, ox, oz) {
   const nBut = 4 + (rng() * 3 | 0);
   for (let k = 0; k < nBut; k++) {
     const a = k / nBut * Math.PI * 2 + rng() * 0.3, bw = tr * 0.5;
-    B.plain.addGeo(tplRoot, compose(x + Math.cos(a) * tr * 0.7, 0, z + Math.sin(a) * tr * 0.7, bw, tr * 2.2, bw, Math.sin(a) * 0.9, 0, -Math.cos(a) * 0.9), COL.barkDark, 0.14, rng);
+    B.bark.addGeo(tplRoot, compose(x + Math.cos(a) * tr * 0.7, 0, z + Math.sin(a) * tr * 0.7, bw, tr * 2.2, bw, Math.sin(a) * 0.9, 0, -Math.cos(a) * 0.9), COL.barkDark, 0.14, rng);
     colData.trunks.push({ x: x + Math.cos(a) * (tr + 1.2), z: z + Math.sin(a) * (tr + 1.2), r: bw * 0.6, h: 3 });
   }
   // spiral limb staircase ground → crown (pads register a walkable ramp; also the trunk climbs)
@@ -111,7 +111,7 @@ function addSinkhole(B, colData, mini, rng, ox, oz) {
   }
   for (let k = 0; k < 3; k++) {                                           // climbable roots back out (r 0.4, tall enough to climb)
     const a = rng() * 7, rx = cx + Math.cos(a) * (pitR - 0.5), rz = cz + Math.sin(a) * (pitR - 0.5);
-    B.plain.addGeo(tplRoot, compose(rx, -depth, rz, 0.4, depth + 2, 0.4, 0, rng() * 7, 0), COL.barkDark, 0.15, rng);
+    B.bark.addGeo(tplRoot, compose(rx, -depth, rz, 0.4, depth + 2, 0.4, 0, rng() * 7, 0), COL.barkDark, 0.15, rng);
     colData.trunks.push({ x: rx, z: rz, r: 0.4, h: 16 });                 // h>14 → the climb code engages
   }
   for (let k = 0; k < 11; k++) {                                          // dense glow garden at the bottom
@@ -330,7 +330,7 @@ function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
     }
     if (rng() < 0.55) {                                  // sapling on the deck
       const [tx, tz] = uvToXZ(axis, cross + (rng() - 0.5) * 3, u0 + 2 + rng() * (spanLen - 4)), sr = 0.8 + rng() * 0.7;
-      B.plain.addGeo(tplTrunk, compose(tx, y, tz, 0.14, 1.4 + rng(), 0.14, 0, rng() * 7, 0), COL.bark, 0.1, rng);
+      B.bark.addGeo(tplTrunk, compose(tx, y, tz, 0.14, 1.4 + rng(), 0.14, 0, rng() * 7, 0), COL.bark, 0.1, rng);
       B.leaf.addGeo(tplBlob, compose(tx, y + 2, tz, sr, sr * 0.7, sr, 0, rng() * 7, 0), leafTintByY(COL.leafB, y + 2), 0.2, rng);
     }
     if (rng() < 0.7) {                                   // grass tuft on the deck
@@ -995,7 +995,7 @@ function buildChunk(ix, iz) {
   const biome = REG.biome;
   const vd = clamp((REG.verdancy - 0.51) / 0.21, -1, 1);   // −1..1 across the canopy band (micro-drift)
   const ox = ix * CHUNK, oz = iz * CHUNK;
-  const B = { plain: new Batch(), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
+  const B = { plain: new Batch(), bark: new Batch(2.2), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
   const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [], ladders: [], lifts: [],
     // Ambient-vignette anchors (Life pass): discovered at build time, driven at runtime by
     // pooled overlays in entities.js. All optional, all cheap; queried O(near) per frame.
@@ -1373,6 +1373,7 @@ function buildChunk(ix, iz) {
   group.matrixAutoUpdate = false;
   const meshes = [
     B.plain.mesh(matPlain, true, true),
+    B.bark.mesh(matBark, true, true),
     B.bld.mesh(matBld, true, true),
     B.leaf.mesh(matLeaf, true, true, leafDepth),
     B.vine.mesh(matVine, false, true),
