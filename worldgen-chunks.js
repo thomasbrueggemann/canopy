@@ -180,6 +180,12 @@ const SKY = {
   sunLow: srgb(0xff7f36), sunHigh: srgb(0xfff3e0),
   moon: srgb(0x93aecd)
 };
+// Canopy-sea albedo drive (see the note in updateSky). These are MULTIPLIERS over the sheet
+// texture, not colours in their own right, so they legitimately sit above 1.
+const SEA_ALBEDO = new THREE.Color(0.56, 0.79, 0.48);   // tuned against the near leaf blobs; green-weighted so
+                                                       // the distant roof keeps its colour under the pale fog wash
+const SEA_MOON = new THREE.Color(0.60, 0.72, 1.00);     // moonlit roof goes blue-grey, not dim green
+const _seaAlb = new THREE.Color();
 const _top = new THREE.Color(), _hor = new THREE.Color(), _sunC = new THREE.Color(), _fogC = new THREE.Color();
 const sunDir = new THREE.Vector3();
 let dayF = 1, nightF = 0, sunElev = 1, dewF = 0;
@@ -252,7 +258,19 @@ function updateSky(t, dt) {
   // raw night-sky colors are near-black, so lerp toward moonlight or the night floor does nothing
   hemi.color.copy(_top).lerp(_hor, 0.6).lerp(SKY.moon, nightF * 0.55);
   amb.intensity = 0.26 + dayF * 0.50 + nightF * 0.2;   // brighter daytime ambient floor for deep-shade streets
-  seaMat.color.copy(COL.leafB).multiplyScalar(0.16 + dayF * 0.95);
+
+  /* Canopy sea. This USED to be `COL.leafB * (0.16 + dayF*0.95)` on an unlit MeshBasicMaterial,
+     i.e. the day/night swing was painted by hand. The sea is lit now, so that ramp would double
+     count: the lights above already swing the roof by sun 0.15→1.75, hemi 0.37→1.51, amb
+     0.26→0.76, a total of ×3.0 from night to noon — while the old hand ramp was ×6.9. What is
+     left for the material is (a) an ALBEDO, not a brightness, and (b) the ×2.3 shortfall, so
+     night still reads as night rather than as dim daylight. Hence a shallow 0.42→1.0 albedo
+     ramp (0.42 × 3.0 ≈ the old 0.144 night/day ratio) plus a cool moonlit tint — the roof goes
+     blue-grey under the moon, which no amount of green multiply ever gave. envMapIntensity
+     rides the same curve so the sky probe does not light a night canopy like an overcast noon. */
+  _seaAlb.copy(SEA_ALBEDO).multiplyScalar(0.42 + dayF * 0.58).lerp(SEA_MOON, nightF * 0.42);
+  seaMat.color.copy(_seaAlb);
+  seaMat.envMapIntensity = 0.07 + dayF * 0.15;
 
   // sky objects
   sunSprite.position.copy(sunDir).multiplyScalar(700);
@@ -301,55 +319,340 @@ function updateSky(t, dt) {
 /* ======================================================================== */
 /*  CANOPY SEA — the endless roof of leaves, seen from above                */
 /* ======================================================================== */
+/* This is the game's signature view: climb the Spire, turn round, and the forest roof runs
+   to every horizon. It used to be an UNLIT MeshBasicMaterial disc — a painted texture at one
+   fixed height — which can only ever read as green felt: no sun rakes across it, there is no
+   terminator at dawn, and a flat disc has no silhouette. It is now a LIT, NORMAL-MAPPED,
+   VERTICALLY DISPLACED surface:
+
+     · MeshStandardMaterial, so sun / hemisphere / ambient / the sky probe all reach it and
+       the roof shades with the hour (see the colour drive in updateSky above — with a lit
+       material the material colour is an ALBEDO, not a brightness ramp);
+     · a Sobel normal map off a drawn height field, so individual crowns catch the light;
+     · real vertical displacement from world-space value noise, so the roof undulates and its
+       far edge is ragged instead of a ruled line;
+     · per-vertex species / moisture tint sampled from the SAME macro region field the chunk
+       builders use (_verdancy/_ruin), so a scorch band in the distance really is olive.
+
+   Everything here is world-locked: positionSea() re-bakes displacement, UVs and tint at a
+   16 m snap exactly the way positionGround() re-displaces the floor sheet, because the mesh
+   itself is parked on the player every frame. Without that the whole roof would swim.
+
+   RNG: the ring is standalone geometry (never emitted through Batch.addGeo) and the texture
+   draws from its own mulberry32(2024), so nothing in this section touches the worldgen rng
+   stream — verified by diffing the worldgen fingerprint before/after. */
+const SEA_TILE = 190;            // metres covered by one texture tile
+const SEA_INNER = 110, SEA_OUTER = 950;
+/* Relief amplitude. Note this is the NOMINAL swing, not the swing you get: three octaves of
+   valueNoise2 summed toward a mean land in roughly the middle half of the range (the same
+   reason TERRAIN_AMP 1.1 only ever produces ~±0.6 m of ground), so a nominal 12 reads as a
+   roof that rises and falls by ~6 m — which is what a real closed canopy does between a
+   gap and an emergent. */
+const SEA_AMP = 17;
+const SEA_LIFT = 2.0;            // mean roof height above the ring's base y
+
+/* The canopy sheet, drawn at TRUE WORLD SCALE. One tile = SEA_TILE metres at S px, so a
+   crown is painted the size a crown actually is (9-27 m across) instead of as a dot, and
+   the lobed outline / gap shadow / clump texture all land at the metre scale they should. */
 function makeSeaTexture() {
-  const S = 512, r = mulberry32(2024);
+  const S = 1024, r = mulberry32(2024);
+  const PM = S / SEA_TILE;                                   // ≈5.39 px per metre
   const c = makeCanvas(S, S), x = c.getContext('2d');
-  x.fillStyle = '#2c4a1e'; x.fillRect(0, 0, S, S);
-  // deep shadow pits between crowns
-  for (let i = 0; i < 160; i++) {
-    const rr = 8 + r() * 26;
-    x.fillStyle = `rgba(14,26,10,${0.3 + r() * 0.4})`;
-    x.beginPath(); x.arc(r() * S, r() * S, rr, 0, 7); x.fill();
+  const cH = makeCanvas(S, S), xh = cH.getContext('2d');     // height field → normal map
+  x.fillStyle = '#0c1808'; x.fillRect(0, 0, S, S);           // the gap floor: deep shade between crowns
+  xh.fillStyle = '#1c1c1c'; xh.fillRect(0, 0, S, S);         // gaps are the LOW ground of the height field
+
+  /* Seam handling. core.js's makeSurfaceTexture uses wrap(), which replays EVERY mark at all
+     8 neighbour offsets; at this feature size that is 9× the fill cost for nothing, because a
+     crown well inside the sheet can never cross an edge. wrapAt() replays a mark only on the
+     sides it actually reaches (1 copy for an interior mark, up to 4 in a corner) — same
+     seamless result, a fifth of the work. The core.js warning still applies in full: every
+     random a mark uses MUST be drawn before the wrapAt call, or the copies diverge and the
+     seam comes straight back. Everything below obeys that. */
+  const wrapAt = (mx, my, rad, fn) => {
+    const xs = mx < rad ? [0, S] : (mx > S - rad ? [0, -S] : [0]);
+    const ys = my < rad ? [0, S] : (my > S - rad ? [0, -S] : [0]);
+    for (const ox of xs) for (const oy of ys) fn(ox, oy);
+  };
+
+  // A crown outline is not a circle. Two sine harmonics give it big lobes, a smoothed random
+  // ring gives the ragged sub-lobe edge — the cauliflower silhouette you actually see from
+  // above. All of it is baked per crown, before any drawing.
+  const LOBE_N = 40;
+  function shape() {
+    let j = new Float32Array(LOBE_N);
+    for (let i = 0; i < LOBE_N; i++) j[i] = (r() - 0.5) * 0.24;
+    for (let pass = 0; pass < 3; pass++) {                   // circular 3-tap smooth: lumpy, not spiky
+      const o = new Float32Array(LOBE_N);
+      for (let i = 0; i < LOBE_N; i++)
+        o[i] = (j[(i + LOBE_N - 1) % LOBE_N] + 2 * j[i] + j[(i + 1) % LOBE_N]) * 0.25;
+      j = o;
+    }
+    return { j, a1: 0.055 + r() * 0.065, f1: 5 + (r() * 5 | 0), p1: r() * 7, a2: 0.028 + r() * 0.036, f2: 11 + (r() * 8 | 0), p2: r() * 7 };
   }
-  // each crown = shadowed base disc + sun-lit lobe offset toward the light,
-  // so from above the canopy reads as rounded masses instead of flat felt
-  for (let i = 0; i < 520; i++) {
-    const rr = 7 + r() * 22, cx2 = r() * S, cy2 = r() * S;
-    const hpx = 84 + (r() - 0.5) * 28, sat = 36 + r() * 26, lig = 20 + r() * 14;
-    x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
-    x.beginPath(); x.arc(cx2, cy2, rr, 0, 7); x.fill();
-    x.fillStyle = `hsl(${hpx},${sat}%,${lig + 12 + r() * 10}%)`;
-    x.beginPath(); x.arc(cx2 - rr * 0.22, cy2 - rr * 0.22, rr * 0.7, 0, 7); x.fill();
-    x.fillStyle = `hsl(${hpx},${sat - 6}%,${lig + 24 + r() * 12}%)`;
-    x.beginPath(); x.arc(cx2 - rr * 0.34, cy2 - rr * 0.34, rr * 0.32, 0, 7); x.fill();
+  const lobe = (ctx, cx2, cy2, rad, k) => {
+    ctx.beginPath();
+    for (let i = 0; i <= LOBE_N; i++) {
+      const a = i / LOBE_N * Math.PI * 2;
+      const m = 1 + k.a1 * Math.sin(a * k.f1 + k.p1) + k.a2 * Math.sin(a * k.f2 + k.p2) + k.j[i % LOBE_N];
+      const px = cx2 + Math.cos(a) * rad * m, py = cy2 + Math.sin(a) * rad * m;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    }
+    ctx.closePath();
+  };
+  const grey = v => { const g = Math.round(clamp(v, 0, 1) * 255); return `rgb(${g},${g},${g})`; };
+
+  // 1) varied gap floor — the shade between crowns is not one flat value
+  for (let i = 0; i < 90; i++) {
+    const gx = r() * S, gy = r() * S, gr = (1.5 + r() * 6) * PM, dark = r() < 0.6, a = 0.25 + r() * 0.4;
+    wrapAt(gx, gy, gr, (ox, oy) => {
+      const g = x.createRadialGradient(gx + ox, gy + oy, 1, gx + ox, gy + oy, gr);
+      g.addColorStop(0, dark ? `rgba(3,8,3,${a})` : `rgba(30,40,18,${a * 0.7})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(gx + ox, gy + oy, gr, 0, 7); x.fill();
+    });
   }
-  // large-scale hue drift washed over the crowns: real forest roofs vary warm/cool in
-  // hundred-metre patches (species stands, moisture), and without it the 7×7 tiling
-  // reads as one repeating green felt from altitude
+
+  /* 2) the crowns. A jittered grid packs them the way a closed canopy actually packs — no
+     lattice, no bald patches — and every crown carries its own height so the roof is a set of
+     domes at DIFFERENT elevations rather than one embossed sheet. Drawn shortest-first, so a
+     taller crown paints over its neighbours exactly as it occludes them from above. */
+  const crowns = [];
+  const G = 15, cell = S / G;                                // ≈12.7 m grid
+  for (let gy = 0; gy < G; gy++) for (let gx = 0; gx < G; gx++) {
+    // mean crown a little NARROWER than the grid cell, so the shadow gaps between crowns
+    // survive instead of being paved over — the gaps are half of what says "forest" from above
+    crowns.push(mkCrown((gx + 0.5 + (r() - 0.5) * 0.9) * cell, (gy + 0.5 + (r() - 0.5) * 0.9) * cell,
+      (4.0 + r() * 4.7) * PM, 0.40 + r() * 0.30));
+  }
+  for (let i = 0; i < 14; i++)                               // emergents: giants a head above the roof
+    crowns.push(mkCrown(r() * S, r() * S, (7.5 + r() * 5) * PM, 0.80 + r() * 0.20));
+  function mkCrown(cx2, cy2, rad, top) {
+    const k = {
+      cx: cx2, cy: cy2, rad, top, sh: shape(),
+      hue: 88 + (r() - 0.5) * 26, sat: 26 + r() * 24, lig: 12 + r() * 10,
+      bl: []
+    };
+    for (let b = 0, n = 4 + (r() * 4 | 0); b < n; b++) {     // interior lobe clusters
+      const a = r() * 7, d = (0.14 + r() * 0.44) * rad;
+      k.bl.push({ dx: Math.cos(a) * d, dy: Math.sin(a) * d, rr: (0.22 + r() * 0.34) * rad, dl: (r() - 0.5) * 9, sh: shape() });
+    }
+    return k;
+  }
+  crowns.sort((a, b) => a.top - b.top);
+  for (const k of crowns) {
+    wrapAt(k.cx, k.cy, k.rad * 1.4, (ox, oy) => {
+      const cx2 = k.cx + ox, cy2 = k.cy + oy;
+      // contact shadow the crown drops into the gap around it
+      lobe(x, cx2, cy2, k.rad * 1.14, k.sh);
+      x.fillStyle = 'rgba(4,10,4,0.55)'; x.fill();
+      // body + view-independent AO (rim darker than crest). Baked directional light is
+      // deliberately absent: the material is lit now, the normal map does that job.
+      lobe(x, cx2, cy2, k.rad, k.sh);
+      const g = x.createRadialGradient(cx2, cy2, k.rad * 0.12, cx2, cy2, k.rad * 1.02);
+      g.addColorStop(0, `hsl(${k.hue},${k.sat}%,${k.lig + 2}%)`);
+      g.addColorStop(0.62, `hsl(${k.hue},${k.sat}%,${k.lig}%)`);
+      g.addColorStop(1, `hsl(${k.hue},${k.sat + 6}%,${Math.max(4, k.lig - 9)}%)`);
+      x.fillStyle = g; x.fill();
+      for (const b of k.bl) {
+        lobe(x, cx2 + b.dx, cy2 + b.dy, b.rr, b.sh);
+        const gb = x.createRadialGradient(cx2 + b.dx, cy2 + b.dy, 1, cx2 + b.dx, cy2 + b.dy, b.rr);
+        gb.addColorStop(0, `hsla(${k.hue},${k.sat}%,${clamp(k.lig + b.dl + 2, 4, 60)}%,0.7)`);
+        gb.addColorStop(1, `hsla(${k.hue},${k.sat}%,${clamp(k.lig + b.dl - 5, 3, 60)}%,0.1)`);
+        x.fillStyle = gb; x.fill();
+      }
+      // height field: a dome from the crown's own top elevation down to the gap floor
+      lobe(xh, cx2, cy2, k.rad * 1.01, k.sh);
+      const gh = xh.createRadialGradient(cx2, cy2, k.rad * 0.06, cx2, cy2, k.rad * 1.01);
+      gh.addColorStop(0, grey(k.top));
+      gh.addColorStop(0.5, grey(k.top - 0.04));
+      gh.addColorStop(0.86, grey(k.top - 0.13));
+      gh.addColorStop(1, grey(k.top - 0.28));
+      xh.fillStyle = gh; xh.fill();
+      for (const b of k.bl) {
+        lobe(xh, cx2 + b.dx, cy2 + b.dy, b.rr, b.sh);
+        const gb = xh.createRadialGradient(cx2 + b.dx, cy2 + b.dy, 1, cx2 + b.dx, cy2 + b.dy, b.rr);
+        gb.addColorStop(0, `rgba(255,255,255,${0.30 + (b.dl + 4.5) * 0.022})`);
+        gb.addColorStop(0.7, `rgba(255,255,255,${0.12 + (b.dl + 4.5) * 0.012})`);
+        gb.addColorStop(1, 'rgba(255,255,255,0)');
+        xh.fillStyle = gb; xh.fill();
+      }
+    });
+  }
+
+  // 3) leaf-clump texture — 0.7-4 m masses, the scale you can actually resolve on a crown
+  //    from a few hundred metres up. Also ripples the height field so the domes aren't smooth.
+  for (let i = 0; i < 5000; i++) {
+    const px = r() * S, py = r() * S, rr = (0.35 + r() * 1.6) * PM;
+    const up = r() < 0.46, a = 0.04 + r() * 0.08;
+    const col = up ? `rgba(${104 + r() * 46 | 0},${132 + r() * 48 | 0},${52 + r() * 30 | 0},${a})`
+                   : `rgba(${8 + r() * 14 | 0},${16 + r() * 18 | 0},${6 + r() * 10 | 0},${a * 1.7})`;
+    const hv = up ? 168 + r() * 40 : 88 - r() * 40;
+    wrapAt(px, py, rr, (ox, oy) => {
+      x.fillStyle = col; x.beginPath(); x.arc(px + ox, py + oy, rr, 0, 7); x.fill();
+      xh.fillStyle = `rgba(${hv | 0},${hv | 0},${hv | 0},0.2)`;
+      xh.beginPath(); xh.arc(px + ox, py + oy, rr, 0, 7); xh.fill();
+    });
+  }
+
+  // 4) dead / bare crowns and vine-choked ones: a handful of odd notes so the roof is not
+  //    one species. Cheap, and the eye finds them immediately from the Spire.
   for (let i = 0; i < 12; i++) {
-    const mr = 60 + r() * 150, mx = r() * S, my = r() * S;
-    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
-    const warm = r() < 0.5;
-    gg.addColorStop(0, warm ? `rgba(150,158,58,${0.07 + r() * 0.07})` : `rgba(26,74,86,${0.07 + r() * 0.07})`);
-    gg.addColorStop(1, 'rgba(0,0,0,0)');
-    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
+    const px = r() * S, py = r() * S, rr = (3 + r() * 4) * PM, sh = shape(), dead = r() < 0.5;
+    const col = dead ? `rgba(${74 + r() * 26 | 0},${64 + r() * 20 | 0},${34 + r() * 16 | 0},0.55)`
+                     : `rgba(${44 + r() * 22 | 0},${88 + r() * 36 | 0},${34 + r() * 18 | 0},0.5)`;
+    wrapAt(px, py, rr * 1.4, (ox, oy) => {
+      lobe(x, px + ox, py + oy, rr, sh); x.fillStyle = col; x.fill();
+    });
   }
-  const t = canvasTex(c); t.repeat.set(7, 7);
-  return t;
+
+  wrapBlur(cH, 2.6);                                         // crown edges become shoulders, not cliffs
+  const map = canvasTex(c);
+  const normal = normalFromHeight(cH, 1.9);
+  for (const t of [map, normal]) t.repeat.set(1, 1);         // UVs are baked in world metres by positionSea
+  return { map, normal };
 }
-const seaMat = new THREE.MeshBasicMaterial({ map: makeSeaTexture(), transparent: true, opacity: 0, depthWrite: true });
-const sea = new THREE.Mesh(new THREE.RingGeometry(110, 950, 56, 3), seaMat);
+
+const _seaTex = makeSeaTexture();
+/* Lit, so the sun rakes it and a terminator crosses it at dawn/dusk. The sky probe supplies
+   the blue/amber bounce a hemisphere light alone cannot. side: DoubleSide is load-bearing —
+   from a shallow angle across 900 m of undulation you DO see the far flank of a crest, and
+   with FrontSide those became holes straight through to the sky. */
+const seaMat = new THREE.MeshStandardMaterial({
+  map: _seaTex.map, normalMap: _seaTex.normal, normalScale: new THREE.Vector2(1.25, 1.25),
+  vertexColors: true, transparent: true, opacity: 0, depthWrite: true,
+  roughness: 0.97, metalness: 0, side: THREE.DoubleSide,
+  envMap: envRT.texture, envMapIntensity: 0.2
+});
+/* Fog curve. scene.fog is linear and saturates at fog.far (580 m up here) while the camera
+   far plane is 700, so past ~580 m the roof is one flat wash — every bit of relief the
+   displacement buys is eaten before the horizon. Delaying the ramp (fog ^1.6) keeps crowns
+   and shadow gaps readable a couple of hundred metres further out while STILL reaching full
+   saturation at exactly fog.far, so the ring never shows a hard cut where the far plane
+   slices it (the cube is the gentlest curve that still leaves the roof legible at ~500 m).
+   Only this material is affected — the real leaf blobs beside it fog normally, which is only
+   detectable inside ~220 m where the sea is tucked under them anyway. */
+seaMat.onBeforeCompile = (shader) => {
+  /* Kill the grazing-angle sheen FIRST. This one is not cosmetic: r152's standard material
+     fixes specularF90 at 1.0, so Schlick's Fresnel climbs to ~0.35 white at the shallow angles
+     you view a canopy from a tower — and with an albedo this dark that white term was running
+     about 3× the diffuse. The result was a roof that turned into a pale tan sheet every time
+     the sun sat low AHEAD of the camera (classic sun-glitter geometry, mirror lobe pointing
+     straight back at you). Leaves do have a waxy sheen — matLeaf keeps one — but on a proxy
+     surface standing in for a square kilometre of foliage it is pure artefact. */
+  const S = '#include <lights_physical_fragment>';
+  if (shader.fragmentShader.indexOf(S) === -1)
+    console.error('CANOPY sea specular damp: anchor "' + S + '" not found in the r152 shader — the roof will glint');
+  shader.fragmentShader = shader.fragmentShader.replace(S,
+    S + '\n  material.specularColor *= 0.30;\n  material.specularF90 = 0.22;\n');
+  const A = '#include <fog_fragment>';
+  if (shader.fragmentShader.indexOf(A) === -1)
+    console.error('CANOPY sea fog curve: anchor "' + A + '" not found in the r152 shader — sea fogs normally');
+  shader.fragmentShader = shader.fragmentShader.replace(A,
+    '#ifdef USE_FOG\n'
+    + '  float _sf = smoothstep(fogNear, fogFar, vFogDepth);\n'
+    + '  gl_FragColor.rgb = mix(gl_FragColor.rgb, fogColor, _sf * _sf * _sf);\n'
+    + '#endif\n');
+};
+seaMat.customProgramCacheKey = () => 'canopy-sea-fog';
+
+/* Ring layout. Radial rings are re-spaced GEOMETRICALLY (r = inner·(outer/inner)^t) because
+   a surface seen from above projects as ~1/r: uniform radial steps put almost every ring in
+   the last few pixels of the view and leave the near roof faceted. 160×56 ≈ 9.2 k verts /
+   18 k tris, which is noise next to the ~500 k the city already draws. */
+const seaGeo = new THREE.RingGeometry(SEA_INNER, SEA_OUTER, 160, 56);
+const SEA_N = seaGeo.attributes.position.count;
+const _seaRamp = new Float32Array(SEA_N);      // relief fades in past the real leaf geometry
+{
+  const p = seaGeo.attributes.position, a = p.array;
+  const LOGR = Math.log(SEA_OUTER / SEA_INNER);
+  const col = new Float32Array(SEA_N * 4);
+  for (let i = 0, o = 0; i < SEA_N; i++, o += 3) {
+    const r0 = Math.hypot(a[o], a[o + 1]) || 1;
+    const t = (r0 - SEA_INNER) / (SEA_OUTER - SEA_INNER);
+    const r1 = SEA_INNER * Math.exp(LOGR * t);
+    a[o] *= r1 / r0; a[o + 1] *= r1 / r0;
+    _seaRamp[i] = smooth(SEA_INNER, 300, r1);
+    // Blend into the real leaf blobs at the inner rim: the painted roof fades out under the
+    // crowns you can actually see instead of ending on a drawn circle. Vertex ALPHA, so the
+    // ring stays a single draw. Safe against depthWrite because opaque geometry has already
+    // been drawn by the time the transparent pass reaches the sea.
+    col[i * 4] = col[i * 4 + 1] = col[i * 4 + 2] = 1;
+    col[i * 4 + 3] = smooth(SEA_INNER + 2, SEA_INNER + 38, r1);
+  }
+  p.needsUpdate = true;
+  seaGeo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  seaGeo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(SEA_N * 2), 2));
+}
+const sea = new THREE.Mesh(seaGeo, seaMat);
 sea.rotation.x = -Math.PI / 2;
 sea.position.y = 26.5;
 sea.visible = false;
+sea.frustumCulled = false;      // it is always centred on the player; the bounding sphere lies after displacement
 scene.add(sea);
+
+// Roof relief. Three octaves of the same value noise the terrain uses, amplitude modulated by
+// the macro verdancy field so a deepgreen stand really does pile up higher than a scorch flat.
+function seaHeight(x, z, verd) {
+  const amp = SEA_AMP * (0.6 + 0.8 * verd);
+  return SEA_LIFT + (0.58 * valueNoise2(x / 178, z / 178, 5501)
+                   + 0.27 * valueNoise2(x / 61, z / 61, 5502)
+                   + 0.15 * valueNoise2(x / 22, z / 22, 5503)) * 2 * amp - amp;
+}
+// Species / moisture tint, as a multiplier over the sheet. Sampled from the SAME macro region
+// field regionBiome() thresholds, so the distant roof agrees with the biome you walk into:
+// olive where the canopy failed, near-black green where the flora won, grey where the city died.
+const SEA_SCORCH = new THREE.Color(1.30, 1.06, 0.50);
+const SEA_DEEP = new THREE.Color(0.66, 1.02, 0.58);
+const SEA_ASH = new THREE.Color(1.10, 1.08, 1.24);
+function seaTint(x, z, verd, ruin, out) {
+  const moist = 0.86 + 0.26 * valueNoise2(x / 132, z / 132, 5511);
+  out.setRGB(moist, moist, moist);
+  // Windows track regionBiome's own thresholds (0.32 / 0.66) so the far roof changes colour
+  // where the biome actually changes — a wider window just paints most of the world olive.
+  if (verd < 0.36) out.lerp(SEA_SCORCH, smooth(0.36, 0.22, verd) * 0.85);
+  else if (verd > 0.62) out.lerp(SEA_DEEP, smooth(0.62, 0.74, verd) * 0.8);
+  if (ruin > 0.62 && verd >= 0.36 && verd <= 0.66) out.lerp(SEA_ASH, smooth(0.62, 0.74, ruin) * 0.7);
+  return out;
+}
+/* Re-bake the roof at an (px, pz) snap — the same contract as positionGround(). The mesh is
+   parked on the player every frame, so displacement, UVs and tint all have to be recomputed
+   in the new local frame or the whole forest swims along with you. Rotation −90° about x maps
+   local (lx, ly, lz) → world (lx, lz, −ly), so the world lookup is (px + lx, pz − ly) and the
+   height goes into the LOCAL z. UVs follow PlaneGeometry's convention (v grows with local +y)
+   so the normal map's handedness matches the ground sheet's. */
+const _seaTintC = new THREE.Color();
+let _seaAtX = NaN, _seaAtZ = NaN;
+function positionSea(px, pz) {
+  if (px === _seaAtX && pz === _seaAtZ) return;
+  _seaAtX = px; _seaAtZ = pz;
+  const p = seaGeo.attributes.position, a = p.array;
+  const uv = seaGeo.attributes.uv, ua = uv.array;
+  const cA = seaGeo.attributes.color, ca = cA.array;
+  // verdancy/ruin are shared by the relief and the tint, so they are sampled ONCE per vertex
+  // and handed to both — each is two valueNoise2 calls and this loop runs 9 k times per snap.
+  for (let i = 0, o = 0; i < SEA_N; i++, o += 3) {
+    const wx = px + a[o], wz = pz - a[o + 1];
+    const cx = wx / CHUNK, cz = wz / CHUNK;
+    const verd = _verdancy(cx, cz), ruin = _ruin(cx, cz);
+    a[o + 2] = _seaRamp[i] * seaHeight(wx, wz, verd);
+    ua[i * 2] = wx / SEA_TILE; ua[i * 2 + 1] = -wz / SEA_TILE;
+    seaTint(wx, wz, verd, ruin, _seaTintC);
+    ca[i * 4] = _seaTintC.r; ca[i * 4 + 1] = _seaTintC.g; ca[i * 4 + 2] = _seaTintC.b;
+  }
+  p.needsUpdate = true; uv.needsUpdate = true; cA.needsUpdate = true;
+  seaGeo.computeVertexNormals();
+}
+positionSea(0, 0);   // never render an undisplaced flat disc, not even on frame one
 
 /* ======================================================================== */
 /*  GROUND                                                                  */
 /* ======================================================================== */
-texGround.repeat.set(80, 80);
-texGroundBump.repeat.set(80, 80);
-texGroundRough.repeat.set(80, 80);
+// The plane is 640 m across and the floor sheet tiles every GROUND_TILE metres.
+const GROUND_REPEAT = 640 / GROUND_TILE;
+texGround.repeat.set(GROUND_REPEAT, GROUND_REPEAT);
+texGroundNormal.repeat.set(GROUND_REPEAT, GROUND_REPEAT);
+texGroundRough.repeat.set(GROUND_REPEAT, GROUND_REPEAT);
 // Sinkhole mouths: the plane opacity-covers anything sunk below y=0 (see the canal fix in
 // worldgen-anomalies.js — canals raise their water above y=0 instead; a sinkhole bowl can't
 // be raised), so the material discards fragments inside up to MAX_GROUND_HOLES world-space
@@ -360,7 +663,7 @@ const MAX_GROUND_HOLES = 6;
 const _holeVecs = Array.from({ length: MAX_GROUND_HOLES }, () => new THREE.Vector3());
 let _groundShader = null;
 const groundMat = new THREE.MeshStandardMaterial({
-  map: texGround, bumpMap: texGroundBump, bumpScale: 0.35,
+  map: texGround, normalMap: texGroundNormal, normalScale: new THREE.Vector2(1.1, 1.1),
   roughnessMap: texGroundRough, roughness: 1, metalness: 0,
   envMap: envRT.texture, envMapIntensity: 0.3
 });
@@ -391,10 +694,38 @@ groundMat.onBeforeCompile = (shader) => {
 };
 groundMat.customProgramCacheKey = () => 'canopy-ground-holes';
 
-const ground = new THREE.Mesh(new THREE.PlaneGeometry(640, 640), groundMat);
+/* Terrain: the floor sheet is no longer two triangles. It is a 192×192 tessellated plane
+   (37 249 verts, 3.33 m per quad — fine enough for terrainY's shortest 12.5 m octave) whose
+   vertices are displaced by terrainY at their WORLD position. Because main.js keeps re-
+   centring the plane on the player snapped to an 8 m grid (one GROUND_TILE, so the floor
+   texture stays world-locked), the displacement is not a one-off: every snap moves the whole
+   lattice to new world coordinates and the heights must be recomputed, followed by
+   computeVertexNormals so raking sun and lamplight read the relief. Measured ≈6 ms per snap
+   for the sampling; snaps happen every 8 m walked.
+   The plane is authored in local XY with +z as its normal, then rotated −90° about x, which
+   maps local (lx, ly, lz) → world (lx, lz, −ly) before the mesh position is added. So the
+   world lookup is (px + lx, pz − ly) and the height goes into the LOCAL z component.
+   The hole-punch shader is untouched: it recomputes vGroundW from modelMatrix * position,
+   so it keys off the displaced world XZ exactly as before. */
+const GROUND_SIZE = 640, GROUND_SEG = 192;
+const groundGeo = new THREE.PlaneGeometry(GROUND_SIZE, GROUND_SIZE, GROUND_SEG, GROUND_SEG);
+const ground = new THREE.Mesh(groundGeo, groundMat);
 ground.rotation.x = -Math.PI / 2;
 ground.receiveShadow = true;
 scene.add(ground);
+let _groundAtX = NaN, _groundAtZ = NaN;
+// Move the floor sheet to an 8 m-snapped (px, pz) and re-displace it. No-op when the snap
+// did not change, which is the common frame.
+function positionGround(px, pz) {
+  if (px === _groundAtX && pz === _groundAtZ) return;
+  _groundAtX = px; _groundAtZ = pz;
+  ground.position.set(px, 0, pz);
+  const attr = groundGeo.attributes.position, a = attr.array;
+  for (let o = 0, n = attr.count * 3; o < n; o += 3) a[o + 2] = terrainY(px + a[o], pz - a[o + 1]);
+  attr.needsUpdate = true;
+  groundGeo.computeVertexNormals();
+}
+positionGround(0, 0);   // displace once at load so the first frame is never a flat sheet
 
 // Rebuild the hole uniform set from every live chunk's round pits (sinkhole bowls; rect pits
 // are canals, handled by the raised waterline instead). Called from ensureChunks ONLY when

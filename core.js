@@ -96,6 +96,74 @@ function randomizeSPIRE() {
 }
 const SPIRE = randomizeSPIRE();
 
+/* ------------------------------------------------------------- terrain ----
+   The world was dead flat at y=0 for its whole life, and a great deal of the codebase
+   encodes that: ~30 builders emit compose(x, 0, z, …) against base-anchored templates,
+   colData.solids/trunks record only a TOP (`h`) with the base implied at 0, player.js
+   resolves support from `let groundY = 0`, and the global ground plane's hole-punch shader
+   exists precisely because anything below y=0 is invisible.
+
+   terrainY(x, z) is the single source of truth that replaces that constant. It is pure,
+   deterministic, cheap, and consumes NO rng — so it can be called from physics, worldgen and
+   entity code without perturbing the worldgen stream (see the note on Batch.addGeo).
+
+   THE FLATNESS MASK is what makes this tractable. Several features have their whole vertical
+   design welded to y=0 and cannot simply be lifted:
+     · canals   — waterY is deliberately +0.14 ABOVE the plane, because a rect pit can't be
+                  punched through it; the channel is cut into an assumed-flat street
+     · sinkholes— the bowl is expressed as depth BELOW 0 and shows through a punched circle
+     · reservoirs/hamlet/spire/colossus/fallen — tall structures on hand-tuned absolute heights
+   Every one of those is gated by a pure function of the chunk index, so terrainY can ask
+   "does this chunk (or a neighbour) need to stay flat?" without building anything, and taper
+   relief to exactly zero there. Those features then keep working untouched.
+
+   Amplitude is deliberately modest (TERRAIN_AMP ≈ 1.1 m over ~90 m wavelengths → grades of a
+   few percent). That is enough to make the ground read as land rather than a table, while
+   staying comfortably walkable and keeping building foundation skirts shallow. */
+const TERRAIN_AMP = 1.1;
+function _terrainRelief(x, z) {
+  return (0.62 * valueNoise2(x / 92, z / 92, 8801)
+        + 0.27 * valueNoise2(x / 34, z / 34, 8802)
+        + 0.11 * valueNoise2(x / 12.5, z / 12.5, 8803)) * 2 - 1;   // valueNoise2 → [0,1]
+}
+// 1 = this chunk must stay perfectly flat. Pure function of the chunk index; safe to call
+// before worldgen-builders.js has loaded (the typeof guards keep core.js self-contained).
+function chunkNeedsFlat(ix, iz) {
+  // The ±1 terms are load-bearing, do not "simplify" them away. isCanalX(ix) puts the channel
+  // on x = ix*CHUNK — the chunk's WEST border — and the embankment straddles it by ±CANAL.bank
+  // (5.5 m). Masking only the chunk east of the line leaves chunk ix-1, whose EAST edge is that
+  // same border, carrying half the embankment unflattened; _flatness bilerps the two chunk
+  // centres either side, so it bottoms out at 0.5 mid-channel instead of 1 and up to 0.61 m of
+  // relief survives in the strip. The canal water plane is welded to an absolute y = +0.14, so
+  // rising ground occludes the water and floods the tow-path and falling ground leaves the
+  // water visibly floating. Same argument on z for isCanalZ.
+  if (typeof isCanalX === 'function' && (isCanalX(ix) || isCanalX(ix + 1) || isCanalZ(iz) || isCanalZ(iz + 1))) return 1;
+  if (ix === SPIRE.cx && iz === SPIRE.cz) return 1;
+  if (typeof HAMLET !== 'undefined' && ix === HAMLET.cx && iz === HAMLET.cz) return 1;
+  if (typeof chunkType === 'function') {
+    const t = chunkType(ix, iz);
+    if (t === 'sinkhole' || t === 'reservoir' || t === 'hamlet' || t === 'colossus' || t === 'fallen') return 1;
+  }
+  return 0;
+}
+// Bilinear blend of the flatness of the 4 surrounding chunk CENTRES, so relief tapers off
+// over a chunk rather than stepping at a border (a step would tear every road and wall
+// straddling that border).
+function _flatness(x, z) {
+  const fx = x / CHUNK - 0.5, fz = z / CHUNK - 0.5;
+  const i0 = Math.floor(fx), j0 = Math.floor(fz);
+  const tx = fx - i0, tz = fz - j0;
+  const sx = tx * tx * (3 - 2 * tx), sz = tz * tz * (3 - 2 * tz);   // smoothstep for C1 continuity
+  const f00 = chunkNeedsFlat(i0, j0), f10 = chunkNeedsFlat(i0 + 1, j0);
+  const f01 = chunkNeedsFlat(i0, j0 + 1), f11 = chunkNeedsFlat(i0 + 1, j0 + 1);
+  return (f00 * (1 - sx) + f10 * sx) * (1 - sz) + (f01 * (1 - sx) + f11 * sx) * sz;
+}
+function terrainY(x, z) {
+  const flat = _flatness(x, z);
+  if (flat >= 0.999) return 0;
+  return _terrainRelief(x, z) * TERRAIN_AMP * (1 - flat);
+}
+
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot');   // screenshot/smoke-test mode
 
@@ -315,6 +383,20 @@ function makeBuildingTextures() {
     else               cols.push({ ww: 64 + r() * 12, panes: 1, bal: r() < 0.35 }); // standard, maybe balcony
   }
   const WY = 22, WH = 80;               // floor band (constant across rows → aligned storeys)
+  /* Published opening table — see makeFacadeAtlas for the contract. One entry per atlas
+     COLUMN, each a list of [u0,u1,v0,v1] openings in CELL FRACTIONS (u from the cell's left
+     edge, v from its BOTTOM, i.e. the way world v runs). bldWalls hangs modelled sills and
+     reveals on exactly these rects, so a painted window and its geometry can never drift
+     apart. Pure arithmetic over `cols` — draws no r(), so the facade rng stream is unmoved. */
+  const bays = cols.map(col => {
+    if (col.pier) return [];
+    const g0 = (cell - (WY + WH)) / cell, g1 = (cell - WY) / cell;
+    if (col.panes === 2) {
+      const gap = 16, pw = (col.ww - gap) / 2, a = (cell - col.ww) / 2;
+      return [[a / cell, (a + pw) / cell, g0, g1], [(a + pw + gap) / cell, (a + col.ww) / cell, g0, g1]];
+    }
+    return [[(cell - col.ww) / 2 / cell, (cell + col.ww) / 2 / cell, g0, g1]];
+  });
   // glass tone families — real streets mix dead-dark glass, greenish reflection,
   // pale sky bounce; one gradient everywhere is what reads "video-gamey"
   const GLASS = [
@@ -448,330 +530,1307 @@ function makeBuildingTextures() {
     xb.fillStyle = '#5a5a5a'; xb.fillRect(cx2 * cell, 0, 2, S);   // recessed panel joint
   }
   const map = canvasTex(c), emissive = canvasTex(e);
-  const rough = canvasTexLinear(cRough), bump = canvasTexLinear(cBump);
+  const rough = canvasTexLinear(cRough);
+  // cBump was drawn as a HEIGHT field all along, so it feeds normalFromHeight directly and
+  // the material gets stable tangent-space relief instead of three's screen-space bumpMap
+  // (which softened every reveal at the grazing angles a street-level camera actually sees a
+  // facade from). One blur first: the reveals/sills are hard fillRect steps, and a 1-texel
+  // cliff Sobels into a rim of extreme normals that reads as an ink outline, not a chamfer.
+  wrapBlur(cBump, 1.1);
+  const normal = normalFromHeight(cBump, 5.5);
   // r152 shares one uv transform (taken from map) across these maps; set all four anyway.
-  map.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
-  emissive.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
-  rough.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
-  bump.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
-  return { map, emissive, rough, bump };
+  for (const t of [map, emissive, rough, normal]) t.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  return { map, emissive, rough, normal, bays };
 }
 
-function makeGroundTexture() {
-  const S = 512, r = mulberry32(77);
+/* ------------------------------------------------------------- facade materials --
+   Every building in the city used to sample the ONE concrete sheet above, which is why
+   every street read as the same building repeated. These are the other materials a real
+   street mixes in — fired brick, painted render over blockwork, glazed ceramic tile —
+   picked per district by FACADE_OF in worldgen-builders.js.
+
+   They honour the concrete sheet's contract, and all of it is load-bearing:
+     · BLD_CELLS x BLD_CELLS cells at repeat 1/BLD_CELLS, so one cell IS one facade bay;
+     · window geometry constant DOWN a column and the window band constant ACROSS every row,
+       so tiling keeps windows stacked in columns and storeys in line whatever atlas phase
+       (uo, vo) a building starts at — and so the skirt can extend v downward without moving
+       a window row;
+     · `bays[]` publishes each column's openings in cell fractions (u from the cell's LEFT
+       edge, v from its BOTTOM) so bldWalls can hang MODELLED sills and reveals on exactly
+       the painted ones. Nothing outside this file can otherwise know where a window is.
+
+   Drawn at TRUE WORLD SCALE. PMx/PMy are px per metre, derived from the district's nominal
+   bay width and storey height (STYLE_CFG's mid-range), and every feature below is sized in
+   METRES through mx()/my(): brick 215x65 mm on 10 mm joints, concrete block 390x190,
+   glazed tile 150. That scale is exactly why brick and tile need a 2048 sheet — at 1024 a
+   bay is 128 px, i.e. ~44 px/m, and a 75 mm brick course lands on under 3 px and moires
+   into felt. Render has no sub-decimetre pattern, so it stays at 1024.
+
+   NOTE on wrap(), the same rule as makeGroundTexture: a mark that has to survive tiling is
+   replayed at the neighbouring sheet offsets, and EVERY random value it uses must be drawn
+   BEFORE the wrap call. Draw inside the callback and each copy gets a different colour and
+   the seam you were hiding comes straight back. Same reason the brick bond re-draws the
+   edge-straddling brick with the colour it ALREADY rolled instead of rolling a fresh one. */
+const FACADE_SPEC = {
+  // seed, sheet px, nominal bay/storey in metres (the district mean), and how far the
+  // roughness / emissive sheets are downsampled (they carry no fine detail — only the
+  // albedo and the Sobel'd normal need the full sheet, and this keeps VRAM sane).
+  brick: { seed: 5501, S: 2048, bayM: 3.1, flrM: 3.35, roughDiv: 4, emiDiv: 8 },
+  render: { seed: 6602, S: 2048, bayM: 5.6, flrM: 4.9, roughDiv: 4, emiDiv: 8 },
+  tile: { seed: 7703, S: 2048, bayM: 2.45, flrM: 3.85, roughDiv: 4, emiDiv: 8 },
+};
+function makeFacadeAtlas(kind) {
+  const K = FACADE_SPEC[kind];
+  const S = K.S, cell = S / BLD_CELLS, r = mulberry32(K.seed);
+  const PMx = cell / K.bayM, PMy = cell / K.flrM;          // px per metre, across / up
+  const mx = (m) => m * PMx, my = (m) => m * PMy;          // metres → px
   const c = makeCanvas(S, S), x = c.getContext('2d');
-  x.fillStyle = '#4e4d46'; x.fillRect(0, 0, S, S);
-  // Bump/rough are replayed from recorded marks after the albedo is drawn — no extra r()
-  // calls, so the ground layout is unchanged.
-  const cRough = makeCanvas(S, S), xr = cRough.getContext('2d');
-  const cBump = makeCanvas(S, S), xb = cBump.getContext('2d');
-  xr.fillStyle = '#e0e0e0'; xr.fillRect(0, 0, S, S);   // ground mostly rough
-  xb.fillStyle = '#808080'; xb.fillRect(0, 0, S, S);
-  const stains = [], cracks = [], moss = [];
-  // large-scale tonal patches first — worn ground is blotchy before it is grainy
-  for (let i = 0; i < 40; i++) {
-    const mx = r() * S, my = r() * S, mr = 40 + r() * 140;
-    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
-    const dark = r() < 0.55;
-    gg.addColorStop(0, dark ? `rgba(30,31,26,${0.06 + r() * 0.1})` : `rgba(140,136,120,${0.05 + r() * 0.08})`);
-    gg.addColorStop(1, 'rgba(0,0,0,0)');
-    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
-  }
-  for (let i = 0; i < 5000; i++) {
-    x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.05)';
-    x.fillRect(r() * S, r() * S, 2, 2);
-  }
-  // old oil / damp stains (r() order preserved exactly; values hoisted so they can be replayed)
-  for (let i = 0; i < 8; i++) {
-    const alpha = 0.1 + r() * 0.12, sx = r() * S, sy = r() * S, rot = r() * 7, ex = 10 + r() * 26, ey = 6 + r() * 14;
-    x.fillStyle = `rgba(18,18,20,${alpha})`;
-    x.save(); x.translate(sx, sy); x.rotate(rot);
-    x.beginPath(); x.ellipse(0, 0, ex, ey, 0, 0, 7); x.fill(); x.restore();
-    stains.push({ sx, sy, rot, ex, ey });
-  }
-  // cracks: a pale worn edge beside each dark line makes them read as depth
-  for (let i = 0; i < 26; i++) {
-    let px = r() * S, py = r() * S;
-    const pts = [[px, py]];
-    for (let k = 0; k < 6; k++) { px += (r() - 0.5) * 90; py += (r() - 0.5) * 90; pts.push([px, py]); }
-    cracks.push(pts);
-    x.strokeStyle = 'rgba(150,146,130,0.3)'; x.lineWidth = 3;
-    x.beginPath(); x.moveTo(pts[0][0] + 1, pts[0][1] + 1);
-    for (const p of pts) x.lineTo(p[0] + 1, p[1] + 1); x.stroke();
-    x.strokeStyle = 'rgba(25,26,22,0.6)'; x.lineWidth = 1.6;
-    x.beginPath(); x.moveTo(pts[0][0], pts[0][1]);
-    for (const p of pts) x.lineTo(p[0], p[1]); x.stroke();
-    // grass sprouting from some cracks
-    if (r() < 0.5) for (const p of pts) {
-      if (r() < 0.4) continue;
-      x.fillStyle = `rgba(${70 + r() * 30 | 0},${100 + r() * 40 | 0},${45 + r() * 20 | 0},${0.3 + r() * 0.3})`;
-      x.beginPath(); x.arc(p[0], p[1], 2 + r() * 4, 0, 7); x.fill();
-    }
-  }
-  // moss blotches
-  for (let i = 0; i < 90; i++) {
-    const mr = 8 + r() * 42, mx = r() * S, my = r() * S;
-    moss.push({ mx, my, mr });
-    const gg = x.createRadialGradient(mx, my, 1, mx, my, mr);
-    const gcol = `${55 + r() * 30 | 0},${85 + r() * 45 | 0},${35 + r() * 20 | 0}`;
-    gg.addColorStop(0, `rgba(${gcol},${0.30 + r() * 0.25})`);
-    gg.addColorStop(1, `rgba(${gcol},0)`);
-    x.fillStyle = gg; x.beginPath(); x.arc(mx, my, mr, 0, 7); x.fill();
-  }
-  // leaf litter
-  for (let i = 0; i < 260; i++) {
-    x.fillStyle = r() < 0.5 ? `rgba(120,90,40,${0.2 + r() * 0.3})` : `rgba(80,110,45,${0.2 + r() * 0.3})`;
-    x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
-    x.fillRect(0, 0, 3 + r() * 4, 2 + r() * 2); x.restore();
-  }
-  // Micro-surface replay (deterministic, no r()): damp/oil stains turn smooth so they sheen
-  // at low sun; cracks + stains recess in bump; moss reads a touch rougher and proud.
-  for (const st of stains) {
-    xr.save(); xr.translate(st.sx, st.sy); xr.rotate(st.rot);
-    xr.fillStyle = '#484848'; xr.beginPath(); xr.ellipse(0, 0, st.ex, st.ey, 0, 0, 7); xr.fill(); xr.restore();
-    xb.save(); xb.translate(st.sx, st.sy); xb.rotate(st.rot);
-    xb.fillStyle = '#707070'; xb.beginPath(); xb.ellipse(0, 0, st.ex, st.ey, 0, 0, 7); xb.fill(); xb.restore();
-  }
-  xb.strokeStyle = '#4c4c4c'; xb.lineWidth = 2;
-  for (const pts of cracks) {
-    xb.beginPath(); xb.moveTo(pts[0][0], pts[0][1]);
-    for (const p of pts) xb.lineTo(p[0], p[1]);
-    xb.stroke();
-  }
-  for (const m of moss) {
-    xr.fillStyle = '#f0f0f0'; xr.beginPath(); xr.arc(m.mx, m.my, m.mr, 0, 7); xr.fill();
-    xb.fillStyle = '#8e8e8e'; xb.beginPath(); xb.arc(m.mx, m.my, m.mr, 0, 7); xb.fill();
-  }
-  const map = canvasTex(c); map.repeat.set(1, 1);
-  const bump = canvasTexLinear(cBump); bump.repeat.set(1, 1);
-  const rough = canvasTexLinear(cRough); rough.repeat.set(1, 1);
-  return { map, bump, rough };
-}
+  const cH = makeCanvas(S, S), xh = cH.getContext('2d');   // height field → normal map
+  const cR = makeCanvas(S, S), xr = cR.getContext('2d');
+  const cE = makeCanvas(S, S), xe = cE.getContext('2d');
+  xe.fillStyle = '#000'; xe.fillRect(0, 0, S, S);
+  const wrap = (fn) => { for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) fn(ox, oy); };
 
-// Bark: a vertical-grain tonal MOTTLE (elongated soft blotches) does the heavy lifting, with
-// thin, numerous, irregular dark cracks laid over it — never a regular comb (which reads as
-// ribbing once it wraps a cylinder) and never bold wires. Albedo stays light so the per-tree
-// COL.bark vertex tint supplies the brown; bump/rough are replayed from the recorded marks
-// (no extra r()). Blotches wrap in x AND y, cracks in x, so the sheet tiles around and up.
-function makeBarkTexture() {
-  const S = 2;                                             // px scale vs the original 256-px sheet (close-up sharpness)
-  const W = 256 * S, H = 512 * S, r = mulberry32(4187);
-  const c = makeCanvas(W, H), x = c.getContext('2d');
-  const cBump = makeCanvas(W, H), xb = cBump.getContext('2d');
-  const cRough = makeCanvas(W, H), xr = cRough.getContext('2d');
-  x.fillStyle = '#e2dacb'; x.fillRect(0, 0, W, H);   // light base; vertex colour tints it brown
-  xb.fillStyle = '#8a8a8a'; xb.fillRect(0, 0, W, H);
-  xr.fillStyle = '#d8d8d8'; xr.fillRect(0, 0, W, H);
-  const WX = [-W, 0, W], WY = [-H, 0, H];
-  // 1) vertical-grain mottle — soft blobs stretched in y (bark runs vertically): one coarse
-  //    tier for tone plates, one fine tier for pore-scale variation (instead of hard speckle,
-  //    which reads as a burlap weave when the flashlight magnifies it)
-  const blobs = [];
-  for (let i = 0; i < 222; i++) {
-    const fine = i >= 72;
-    const bx = r() * W, by = r() * H, brx = (fine ? 3.5 + r() * 12 : 14 + r() * 46) * S, ely = 1.4 + r() * 1.6, dark = r() < 0.5,
-      a = fine ? 0.05 + r() * 0.09 : 0.09 + r() * 0.15;
-    blobs.push({ bx, by, brx, ely, dark, a });
-    for (const ox of WX) for (const oy of WY) {
-      if (Math.abs(bx + ox - W / 2) > W / 2 + brx * ely || Math.abs(by + oy - H / 2) > H / 2 + brx * ely) continue;
-      x.save(); x.translate(bx + ox, by + oy); x.scale(1, ely);
-      const g = x.createRadialGradient(0, 0, 1, 0, 0, brx);
-      g.addColorStop(0, dark ? `rgba(50,40,28,${a})` : `rgba(210,200,182,${a})`); g.addColorStop(1, 'rgba(0,0,0,0)');
-      x.fillStyle = g; x.beginPath(); x.arc(0, 0, brx, 0, 7); x.fill(); x.restore();
+  /* ---- 1. window rhythm. One style per COLUMN, held all the way down it. --------- */
+  const cols = [];
+  for (let i = 0; i < BLD_CELLS; i++) {
+    const t = r();
+    if (kind === 'tile') {                       // curtain wall: wide glazing, few solids
+      if (t < 0.10) cols.push({ pier: true });
+      else if (t < 0.55) cols.push({ w: 0.80 + r() * 0.08, n: 2 });
+      else cols.push({ w: 0.70 + r() * 0.14, n: 1 });
+    } else if (kind === 'render') {              // works: big steel-framed lights, blind bays
+      if (t < 0.20) cols.push({ pier: true });
+      else if (t < 0.52) cols.push({ w: 0.60 + r() * 0.16, n: 2 });
+      else cols.push({ w: 0.48 + r() * 0.22, n: 1 });
+    } else {                                     // brick: narrow punched openings
+      if (t < 0.16) cols.push({ pier: true });
+      else if (t < 0.44) cols.push({ w: 0.28 + r() * 0.08, n: 1 });
+      else if (t < 0.74) cols.push({ w: 0.38 + r() * 0.09, n: 1 });
+      else cols.push({ w: 0.46 + r() * 0.10, n: 2 });
     }
   }
-  // 2) thin subtle vertical cracks (dark only) + a few deeper character cracks — irregular
-  //    spacing and broken length, wandering by two summed sines so none are parallel.
-  const cracks = [];
-  for (let i = 0; i < 30; i++) {
-    const sx = r() * W, y0 = r() * H, y1 = y0 + H * (0.12 + r() * 0.3), w = (1 + r() * 2.6) * S, a = 0.07 + r() * 0.09;
-    cracks.push({ sx, y0, y1, w, a, a1: (2 + r() * 5) * S, p1: 0.5 + r() * 1.4, ph1: r() * 7, a2: (0.5 + r() * 2.2) * S, p2: 2 + r() * 2.5, ph2: r() * 7,
-      dash: [(42 + r() * 50) * S, (16 + r() * 26) * S], dashOff: r() * 60 * S });
-  }
-  for (let i = 0; i < 4; i++) {
-    const sx = r() * W, y0 = r() * H, y1 = y0 + H * (0.22 + r() * 0.33), w = (2 + r() * 2.5) * S, a = 0.11 + r() * 0.09;
-    cracks.push({ sx, y0, y1, w, a, a1: (2 + r() * 6) * S, p1: 0.5 + r() * 1.4, ph1: r() * 7, a2: (0.5 + r() * 2) * S, p2: 2 + r() * 2.5, ph2: r() * 7, deep: 1,
-      dash: [(60 + r() * 60) * S, (20 + r() * 30) * S], dashOff: r() * 60 * S });
-  }
-  const fx = (f, yy) => f.sx + Math.sin(yy / H * f.p1 * 6.283 + f.ph1) * f.a1 + Math.sin(yy / H * f.p2 * 6.283 + f.ph2) * f.a2;
-  // cracks wrap in x AND y (y0/y1 may run past H; the WY copies close the loop) so the
-  // v-tile border gets no crack-free seam band. blur melts the strokes into the mottle;
-  // if the 2d context lacks filter support the lines just stay crisp.
-  const stroke = (ctx, f, style, lw, dx, blur) => {
-    ctx.filter = blur ? `blur(${blur}px)` : 'none';
-    for (const ox of WX) for (const oy of WY) {
-      ctx.strokeStyle = style; ctx.lineWidth = lw; ctx.lineCap = 'round';
-      ctx.setLineDash(f.dash); ctx.lineDashOffset = f.dashOff;
-      ctx.beginPath(); for (let yy = f.y0; yy <= f.y1; yy += 7 * S) ctx.lineTo(fx(f, yy) + ox + (dx || 0), yy + oy); ctx.stroke();
-    }
-    ctx.setLineDash([]); ctx.filter = 'none';
-  };
-  // fissures blend rather than draw: each is a wide faint smudge with a slightly firmer core,
-  // dashed in long broken runs so no line is continuous, plus a whisper of a lit ridge beside
-  // it — painted relief for the shaded side, where the bump map gets no directional light
-  for (const f of cracks) {
-    stroke(x, f, `rgba(52,42,30,${f.a * 0.4})`, f.w * 2.4, 0, 2 * S);
-    stroke(x, f, `rgba(46,36,26,${f.a})`, f.w, 0, 1 * S);
-    stroke(x, f, `rgba(238,228,208,${f.a * 0.3})`, Math.max(0.8, f.w * 0.7), f.w + 1.1 * S, 1 * S);
-  }
-  // 3) subtle horizontal flake breaks
-  for (let i = 0; i < 80; i++) {
-    const cx = r() * W, cy = r() * H, cw = (4 + r() * 11) * S, dark = r() < 0.65, a = 0.08 + r() * 0.12, lw = (0.7 + r() * 1.2) * S, dy = (r() - 0.5) * 2.5 * S;
-    x.filter = `blur(${S * 0.5}px)`;
-    for (const ox of WX) {
-      x.strokeStyle = dark ? `rgba(44,35,24,${a})` : `rgba(226,218,202,${a})`; x.lineWidth = lw;
-      x.beginPath(); x.moveTo(cx + ox, cy); x.lineTo(cx + ox + cw, cy + dy); x.stroke();
-    }
-    x.filter = 'none';
-  }
-  // 4) fine grain speckle — soft, sparse pores (kept faint; the fine mottle tier carries the grain)
-  for (let i = 0; i < 2400; i++) {
-    x.fillStyle = r() < 0.5 ? 'rgba(0,0,0,0.04)' : 'rgba(255,248,236,0.035)';
-    const sz = (0.8 + r() * 1.4) * S;
-    x.beginPath(); x.arc(r() * W, r() * H, sz, 0, 7); x.fill();
-  }
-  // --- bump/rough replay (no extra r()): pore relief + cracks recess/roughen. Coarse plates
-  // stay OUT of the bump sheet — their metre-wide shallow gradients quantise into 8-bit gray
-  // steps, and each step boundary shades as a visible contour ring under a close light. The
-  // albedo mottle already carries the plate tone; bump only keeps short-range features. ---
-  for (const b of blobs) {
-    if (b.brx >= 26 * S) continue;   // fine pores only
-    for (const ox of WX) for (const oy of WY) {
-      if (Math.abs(b.bx + ox - W / 2) > W / 2 + b.brx * b.ely || Math.abs(b.by + oy - H / 2) > H / 2 + b.brx * b.ely) continue;
-      xb.save(); xb.translate(b.bx + ox, b.by + oy); xb.scale(1, b.ely);
-      const g = xb.createRadialGradient(0, 0, 1, 0, 0, b.brx);
-      g.addColorStop(0, `rgba(${b.dark ? 104 : 160},${b.dark ? 104 : 160},${b.dark ? 104 : 160},${b.a * 0.9})`); g.addColorStop(1, 'rgba(138,138,138,0)');
-      xb.fillStyle = g; xb.beginPath(); xb.arc(0, 0, b.brx, 0, 7); xb.fill(); xb.restore();
-    }
-  }
-  // softened relief (#5a/#72 vs the old #4a/#6a): under a grazing flashlight the deep strokes
-  // were reading as black slots
-  for (const f of cracks) { stroke(xb, f, f.deep ? '#646464' : '#7a7a7a', f.w + 0.5, 0, 1.5 * S); stroke(xr, f, '#eaeaea', f.w + 0.5, 0, 1.5 * S); }
-  // final whole-sheet blur on the bump map: bilinear magnification makes the bump derivative
-  // constant per texel, so up close every texel lights as a flat square (a burlap-weave grid).
-  // Smoothing keeps the relief but makes its gradients continuous. The source is first laid
-  // out 3×3-wrapped on a padded canvas so the blur kernel never sees an edge (no tile seams).
-  {
-    const M = 16 * S;
-    const t = makeCanvas(W + 2 * M, H + 2 * M), tt = t.getContext('2d');
-    for (const ox of WX) for (const oy of WY) tt.drawImage(cBump, ox + M, oy + M);
-    xb.filter = `blur(${S}px)`; xb.drawImage(t, -M, -M); xb.filter = 'none';
-  }
-  // no repeat here — the bark Batch bakes world-scale UV repeats per piece (Batch.uvWorld)
-  const map = canvasTex(c), bump = canvasTexLinear(cBump), rough = canvasTexLinear(cRough);
-  map.anisotropy = bump.anisotropy = rough.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
-  return { map, bump, rough };
-}
+  const G0 = kind === 'tile' ? 0.15 : kind === 'render' ? 0.24 : 0.20;   // window band, cell
+  const G1 = kind === 'tile' ? 0.88 : kind === 'render' ? 0.86 : 0.80;   // fractions from BOTTOM
+  const bays = cols.map(col => {
+    if (col.pier) return [];
+    const a = (1 - col.w) / 2, b = a + col.w;
+    if (col.n === 2) { const g = 0.055, pw = (col.w - g) / 2; return [[a, a + pw, G0, G1], [a + pw + g, b, G0, G1]]; }
+    return [[a, b, G0, G1]];
+  });
+  // cell fraction → sheet px. v is measured from the cell BOTTOM, the canvas from the top.
+  const PX = (cx, f) => (cx + f) * cell;
+  const PY = (f) => (1 - f) * cell;               // within a cell, top-relative
 
-function makeLeafTexture() {
-  const S = 512, r = mulberry32(5150);   // 512 px + shaped leaves: crisp fronds at arm's length
-  const c = makeCanvas(S, S), x = c.getContext('2d');
-  x.clearRect(0, 0, S, S);
-  // pointed leaf: two quadratic arcs tip-to-tip (a lens), which reads as an actual leaf
-  // where the old plain ellipse read as confetti at close range
-  function leafPath(rw, rh) {
-    x.beginPath();
-    x.moveTo(-rw, 0);
-    x.quadraticCurveTo(0, -rh * 1.55, rw, 0);
-    x.quadraticCurveTo(0, rh * 1.55, -rw, 0);
-  }
-  // dark under-layer leaves first, lit leaves on top — foliage depth comes from
-  // shadowed leaves showing between the bright ones, not from a flat confetti layer
-  for (let layer = 0; layer < 2; layer++) {
-    const n = layer === 0 ? 390 : 450, shade = layer === 0;
-    for (let i = 0; i < n; i++) {
-      const hpx = 82 + (r() - 0.5) * 38, s = 38 + r() * 26;
-      const l = shade ? 16 + r() * 14 : 40 + r() * 24;
-      const rw = 12 + r() * 19, rh = 5 + r() * 8;
-      x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
-      x.fillStyle = `hsl(${hpx},${s}%,${l}%)`;
-      leafPath(rw, rh); x.fill();
-      if (!shade) {
-        // lit upper half, darker midrib, and two side veins give each leaf a fold
-        x.fillStyle = `hsl(${hpx},${s}%,${Math.min(72, l + 12)}%)`;
-        x.save(); x.scale(0.88, 0.5); x.translate(0, -rh * 0.55); leafPath(rw, rh); x.fill(); x.restore();
-        x.strokeStyle = `hsl(${hpx},${s + 8}%,${Math.max(10, l - 18)}%)`; x.lineWidth = 1.2;
-        x.beginPath(); x.moveTo(-rw * 0.9, 0); x.lineTo(rw * 0.9, 0); x.stroke();
-        x.lineWidth = 0.8;
-        for (const sgn of [-1, 1]) {
-          x.beginPath(); x.moveTo(-rw * 0.25, 0); x.lineTo(rw * 0.15, sgn * rh * 0.75);
-          x.moveTo(rw * 0.25, 0); x.lineTo(rw * 0.55, sgn * rh * 0.55);
-          x.stroke();
+  /* ---- 2. the wall field, at true scale --------------------------------------- */
+  if (kind === 'brick') {
+    // Running bond. The mortar is the BACKGROUND and each brick face is inset by one joint,
+    // so the joint width is exact everywhere instead of accumulating rounding. bwPx divides
+    // S exactly and S/chPx is EVEN, so the half-brick offset on alternate courses tiles.
+    const bwPx = S / Math.round(S / mx(0.225));
+    const chPx = S / (2 * Math.round(S / my(0.075) / 2));
+    const jx = Math.max(0.75, mx(0.010)), jy = Math.max(0.7, my(0.010));
+    x.fillStyle = '#6b6058'; x.fillRect(0, 0, S, S);        // lime mortar
+    xh.fillStyle = '#5e5e5e'; xh.fillRect(0, 0, S, S);      // joints sit BELOW the faces
+    xr.fillStyle = '#ececec'; xr.fillRect(0, 0, S, S);      // mortar is very rough
+    const nC = Math.round(S / chPx), nB = Math.round(S / bwPx);
+    for (let j = 0; j < nC; j++) {
+      const by = j * chPx, off = (j & 1) ? bwPx / 2 : 0;
+      for (let k = 0; k < nB; k++) {
+        const bx = k * bwPx + off;
+        // fired clay is never one colour: mostly mid red-brown, some over-burnt blue-black
+        // headers, some pale under-fired, and the odd frost-spalled face
+        const t = r(); let cr, cg, cb, ro = 226, hv;
+        if (t < 0.06) { cr = 76 + r() * 18; cg = 70 + r() * 16; cb = 74 + r() * 18; ro = 150; }
+        else if (t < 0.14) { cr = 156 + r() * 20; cg = 138 + r() * 18; cb = 118 + r() * 16; }
+        else if (t < 0.17) { cr = 142 + r() * 18; cg = 116 + r() * 14; cb = 100 + r() * 12; ro = 250; }  // spalled
+        else { const v = r(); cr = 122 + v * 34 + r() * 10; cg = 94 + v * 24 + r() * 9; cb = 78 + v * 18 + r() * 8; }
+        hv = (t < 0.17 && t >= 0.14) ? 110 : 150 + r() * 40;     // spalled faces sink
+        const fill = `rgb(${cr | 0},${cg | 0},${cb | 0})`, hgt = `rgb(${hv | 0},${hv | 0},${hv | 0})`;
+        const rgh = `rgb(${ro},${ro},${ro})`;
+        // a brick straddling the right edge is REDRAWN at the left with the colour it already
+        // rolled — rolling a fresh one there is the wrap() seam bug in bond form
+        for (const ox of (bx + bwPx > S ? [0, -S] : [0])) {
+          x.fillStyle = fill; x.fillRect(bx + ox + jx, by + jy, bwPx - 2 * jx, chPx - 2 * jy);
+          xh.fillStyle = hgt; xh.fillRect(bx + ox + jx, by + jy, bwPx - 2 * jx, chPx - 2 * jy);
+          xr.fillStyle = rgh; xr.fillRect(bx + ox + jx, by + jy, bwPx - 2 * jx, chPx - 2 * jy);
         }
       }
+    }
+    // stepped cracks that follow the bond (brick fails through the joints, not the bricks)
+    for (let i = 0; i < 16; i++) {
+      const sx = r() * S, sy = r() * S, len = 6 + (r() * 14 | 0), dir = r() < 0.5 ? 1 : -1;
+      const pts = []; let px2 = sx, py2 = sy;
+      for (let k = 0; k < len; k++) { pts.push([px2, py2]); px2 += dir * bwPx * (r() < 0.5 ? 0.5 : 1); py2 += chPx; }
+      wrap((ox, oy) => {
+        x.strokeStyle = 'rgba(38,34,30,0.5)'; x.lineWidth = Math.max(1, jx * 1.4);
+        x.beginPath(); x.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) x.lineTo(p[0] + ox, p[1] + oy);
+        x.stroke();
+        xh.strokeStyle = 'rgba(52,52,52,0.7)'; xh.lineWidth = Math.max(1, jx * 1.4);
+        xh.beginPath(); xh.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) xh.lineTo(p[0] + ox, p[1] + oy);
+        xh.stroke();
+      });
+    }
+    // efflorescence: the pale salt bloom that leaches out of damp brick, ~0.3-1.2 m across
+    for (let i = 0; i < 26; i++) {
+      const ex = r() * S, ey = r() * S, er = mx(0.15 + r() * 0.45), a = 0.06 + r() * 0.14;
+      const g = x.createRadialGradient(ex, ey, 1, ex, ey, er);
+      g.addColorStop(0, `rgba(226,224,214,${a})`); g.addColorStop(1, 'rgba(226,224,214,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(ex, ey, er, 0, 7); x.fill();
+    }
+  } else if (kind === 'render') {
+    // Painted render over blockwork: one broad painted field, then everything that happens
+    // to it — patch repairs in a slightly-off tone, crazing, and blown patches where the
+    // render has come away and the 390x190 blocks show through.
+    x.fillStyle = '#b6b1a6'; x.fillRect(0, 0, S, S);
+    xh.fillStyle = '#8c8c8c'; xh.fillRect(0, 0, S, S);
+    xr.fillStyle = '#dedede'; xr.fillRect(0, 0, S, S);
+    for (let i = 0; i < 26; i++) {                    // patch repairs, 0.4-2.5 m across
+      const px2 = r() * S, py2 = r() * S, pw = mx(0.4 + r() * 2.1), ph = my(0.3 + r() * 1.6);
+      const v = r() < 0.5 ? 16 : -18, a = 0.10 + r() * 0.18;
+      x.fillStyle = `rgba(${182 + v | 0},${177 + v | 0},${166 + v | 0},${a})`;
+      x.fillRect(px2, py2, pw, ph);
+      xh.fillStyle = `rgba(${140 + (v > 0 ? 16 : -14)},${140},${140},0.5)`;
+      xh.fillRect(px2, py2, pw, ph);
+    }
+    // Float texture. This is the only thing standing between a render wall and a sheet of
+    // plastic at close range, but it is FINE — 1-4 cm of sand grain, packed dense. Drawn big
+    // and sparse (the first pass here used 3-12 cm blobs at 0.4 height alpha) it reads as
+    // bubble wrap, because the Sobel turns every isolated blob into a blister.
+    for (let i = 0; i < 26000; i++) {
+      const sx = r() * S, sy = r() * S, sr = mx(0.012 + r() * 0.028), up = r() < 0.5;
+      x.fillStyle = up ? 'rgba(255,253,246,0.05)' : 'rgba(86,82,74,0.05)';
+      x.beginPath(); x.arc(sx, sy, sr, 0, 7); x.fill();
+      xh.fillStyle = up ? 'rgba(188,188,188,0.28)' : 'rgba(90,90,90,0.28)';
+      xh.beginPath(); xh.arc(sx, sy, sr, 0, 7); xh.fill();
+    }
+    for (let i = 0; i < 60; i++) {                    // and the slow unevenness of a floated wall
+      const sx = r() * S, sy = r() * S, sr = mx(0.3 + r() * 0.9), up = r() < 0.5;
+      const g = xh.createRadialGradient(sx, sy, 1, sx, sy, sr);
+      g.addColorStop(0, up ? 'rgba(160,160,160,0.5)' : 'rgba(112,112,112,0.5)');
+      g.addColorStop(1, 'rgba(140,140,140,0)');
+      xh.fillStyle = g; xh.beginPath(); xh.arc(sx, sy, sr, 0, 7); xh.fill();
+    }
+    // Crazing: the map-crack network. It is a FINE net — 10-40 cm cells — and drawing it at
+    // metre scale (the first pass here did) reads as somebody scribbled on the wall.
+    for (let i = 0; i < 260; i++) {
+      let px2 = r() * S, py2 = r() * S; const pts = [[px2, py2]];
+      for (let k = 0; k < 5; k++) { px2 += (r() - 0.5) * mx(0.16); py2 += (r() - 0.5) * my(0.16); pts.push([px2, py2]); }
+      wrap((ox, oy) => {
+        x.strokeStyle = 'rgba(120,114,102,0.22)'; x.lineWidth = 1;
+        x.beginPath(); x.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) x.lineTo(p[0] + ox, p[1] + oy);
+        x.stroke();
+        xh.strokeStyle = 'rgba(112,112,112,0.42)'; xh.lineWidth = 1.2;
+        xh.beginPath(); xh.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) xh.lineTo(p[0] + ox, p[1] + oy);
+        xh.stroke();
+      });
+    }
+    // blown render: an irregular patch where the render has come off the blockwork behind.
+    // Kept shallow and low-contrast — a bright rim reads as scribbled-on graffiti, not damage.
+    const blW = mx(0.4), blH = my(0.2);
+    for (let i = 0; i < 13; i++) {
+      const bx = r() * S, by = r() * S, br = mx(0.2 + r() * 0.5), pts = [];
+      for (let k = 0; k <= 11; k++) { const a = k / 11 * Math.PI * 2; pts.push([Math.cos(a) * br * (0.5 + r() * 0.75), Math.sin(a) * br * 0.7 * (0.5 + r() * 0.75)]); }
+      const path = (ctx) => { ctx.beginPath(); ctx.moveTo(bx + pts[0][0], by + pts[0][1]); for (const p of pts) ctx.lineTo(bx + p[0], by + p[1]); ctx.closePath(); };
+      x.save(); path(x); x.clip();
+      x.fillStyle = '#8b877e'; x.fillRect(bx - br * 2, by - br * 2, br * 4, br * 4);          // grey block
+      x.strokeStyle = 'rgba(66,64,60,0.5)'; x.lineWidth = Math.max(1, mx(0.012));              // block joints
+      for (let j = -3; j <= 3; j++) { const ly = by + j * blH; x.beginPath(); x.moveTo(bx - br * 2, ly); x.lineTo(bx + br * 2, ly); x.stroke(); }
+      for (let j = -3; j <= 3; j++) { const lx = bx + j * blW + ((Math.round(by / blH) & 1) ? blW / 2 : 0); x.beginPath(); x.moveTo(lx, by - br * 2); x.lineTo(lx, by + br * 2); x.stroke(); }
       x.restore();
+      xh.save(); path(xh); xh.fillStyle = '#6e6e6e'; xh.fill(); xh.restore();                  // the patch sits BELOW the render
+      xr.save(); path(xr); xr.fillStyle = '#f2f2f2'; xr.fill(); xr.restore();                  // bare block drinks light
+      x.save(); path(x); x.strokeStyle = 'rgba(206,202,192,0.28)'; x.lineWidth = Math.max(1, mx(0.02)); x.stroke(); x.restore();
+    }
+    // rust bleeding out of the reinforcement and the fixings — the works district's own stain
+    for (let i = 0; i < 22; i++) {
+      const rx2 = r() * S, ry2 = r() * S, rw = mx(0.03 + r() * 0.09), rl = my(0.4 + r() * 2.2);
+      const g = x.createLinearGradient(0, ry2, 0, ry2 + rl);
+      g.addColorStop(0, `rgba(126,74,40,${0.16 + r() * 0.2})`); g.addColorStop(1, 'rgba(126,74,40,0)');
+      x.fillStyle = g; x.fillRect(rx2, ry2, rw, rl);
+    }
+  } else {   // tile
+    // 150 mm glazed ceramic on a grout bed. The grout is the background; every tile is
+    // inset, so grout lines stay a constant width and the grid tiles exactly.
+    /* CONTRAST DISCIPLINE — this grid is the highest-frequency thing in the city and it sits
+       right at the Nyquist limit for a facade a street away. Drawn the obvious way (dark grout,
+       bright glaze, tiles glossy against matte grout) it mip-averages into a shimmering
+       black/white checker, and with the sky probe on the glaze it does it in bright cyan. So:
+       grout stays CLOSE to the tile in tone, grout lines are at least 1.6 px wide so a mip has
+       something to average, the glaze/grout roughness step is gentle, and the crispness lives
+       in the normal map (which is blurred harder before the Sobel) instead of the albedo. */
+    const tp = S / Math.round(S / mx(0.155)), tq = S / Math.round(S / my(0.155));
+    const gx2 = Math.max(1.6, mx(0.008)), gy2 = Math.max(1.6, my(0.008));
+    x.fillStyle = '#9d9a92'; x.fillRect(0, 0, S, S);
+    xh.fillStyle = '#5a5a5a'; xh.fillRect(0, 0, S, S);
+    xr.fillStyle = '#a8a8a8'; xr.fillRect(0, 0, S, S);
+    const nX = Math.round(S / tp), nY = Math.round(S / tq);
+    for (let j = 0; j < nY; j++) for (let k = 0; k < nX; k++) {
+      const tx = k * tp, ty = j * tq, t = r();
+      if (t < 0.012) {                                  // a tile off: adhesive comb marks
+        x.fillStyle = '#83807a'; x.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+        x.fillStyle = 'rgba(72,70,66,0.4)';
+        for (let v = 0; v < 5; v++) x.fillRect(tx + gx2, ty + gy2 + v * (tq / 6), tp - 2 * gx2, Math.max(1, tq * 0.05));
+        xh.fillStyle = '#4c4c4c'; xh.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+        xr.fillStyle = '#cacaca'; xr.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+        continue;
+      }
+      // glazed tiles come out of the kiln with a real spread of tone — that variation IS
+      // the look; one flat colour reads as printed paper. Kept to a ~15% spread around the
+      // grout, though: a wide spread is a random checker, and a random checker aliases.
+      const v = r(), cr = 158 + v * 22 + r() * 6, cg = 164 + v * 21 + r() * 6, cb = 158 + v * 20 + r() * 6;
+      x.fillStyle = `rgb(${cr | 0},${cg | 0},${cb | 0})`;
+      x.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+      const hv = 162 + r() * 26;
+      xh.fillStyle = `rgb(${hv | 0},${hv | 0},${hv | 0})`;
+      xh.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+      const ro = 120 + r() * 26;                         // glaze is the glossiest thing here,
+      xr.fillStyle = `rgb(${ro | 0},${ro | 0},${ro | 0})`;   // but only just — see the note above
+      xr.fillRect(tx + gx2, ty + gy2, tp - 2 * gx2, tq - 2 * gy2);
+    }
+    for (let i = 0; i < 20; i++) {                       // dirt washed down the grout lines
+      const gxp = Math.round(r() * nX) * tp, gl = my(0.8 + r() * 3.2), gyp = r() * S;
+      const g = x.createLinearGradient(0, gyp, 0, gyp + gl);
+      g.addColorStop(0, `rgba(66,66,60,${0.1 + r() * 0.14})`); g.addColorStop(1, 'rgba(66,66,60,0)');
+      x.fillStyle = g; x.fillRect(gxp - gx2, gyp, gx2 * 3, gl);
     }
   }
-  return canvasTex(c);
+
+  /* ---- 3. the weathering every material shares -------------------------------- */
+  for (let i = 0; i < 34; i++) {                         // large tonal drift, metres across
+    const px2 = r() * S, py2 = r() * S, pr = mx(0.8 + r() * 3.4), dark = r() < 0.6;
+    const g = x.createRadialGradient(px2, py2, 1, px2, py2, pr);
+    g.addColorStop(0, dark ? `rgba(48,50,44,${0.04 + r() * 0.08})` : `rgba(214,210,196,${0.03 + r() * 0.06})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.beginPath(); x.arc(px2, py2, pr, 0, 7); x.fill();
+  }
+  for (let i = 0; i < 54; i++) {                         // grime running down from above
+    const gxp = r() * S, gw = mx(0.05 + r() * 0.26), gl = my(1 + r() * 5), gy2 = r() * S;
+    const g = x.createLinearGradient(0, gy2, 0, gy2 + gl);
+    g.addColorStop(0, `rgba(44,48,40,${0.05 + r() * 0.1})`); g.addColorStop(1, 'rgba(44,48,40,0)');
+    x.fillStyle = g; x.fillRect(gxp, gy2, gw, gl);
+  }
+
+  /* ---- 4. the windows ---------------------------------------------------------- */
+  const FRAME = kind === 'brick' ? '#4b4034' : kind === 'render' ? '#585a54' : '#9aa0a6';
+  const GLASS = kind === 'tile'
+    ? [['#5c7382', '#2a3a44'], ['#48606c', '#1e2a32'], ['#6b8492', '#32444e'], ['#334552', '#141d24'], ['#54707a', '#26353c']]
+    : [['#38444c', '#161c20'], ['#2c3a36', '#121a16'], ['#1a2024', '#0b0e10'], ['#4a5a50', '#1e2822'], ['#243038', '#101418']];
+  const eD = 1 / K.emiDiv;
+  const rects = [];                                      // replayed onto rough after the loop
+  function pane(wx, wy, ww, wh, state, mull) {
+    rects.push({ wx, wy, ww, wh, state });
+    const rv = Math.max(2, mx(0.05));                    // the painted part of the reveal
+    x.fillStyle = 'rgba(26,26,22,0.5)'; x.fillRect(wx - rv, wy - rv, ww + 2 * rv, wh + 2 * rv);
+    x.fillStyle = FRAME; x.fillRect(wx - rv * 0.6, wy - rv * 0.6, ww + rv * 1.2, wh + rv * 1.2);
+    if (state === 'lit') {
+      const lg = x.createLinearGradient(0, wy, 0, wy + wh);
+      lg.addColorStop(0, '#b9a888'); lg.addColorStop(1, '#7e6b47');
+      x.fillStyle = lg; x.fillRect(wx, wy, ww, wh);
+      xe.fillStyle = '#ffb35e'; xe.fillRect(wx * eD, wy * eD, ww * eD, wh * eD);
+    } else if (state === 'broken') {
+      x.fillStyle = '#0b0e0f'; x.fillRect(wx, wy, ww, wh);
+      x.fillStyle = 'rgba(150,160,170,0.32)';
+      for (let k = 0; k < 4; k++) {
+        const bx2 = wx + r() * ww, by2 = wy + (r() < 0.5 ? 0 : wh), sg = by2 > wy ? -1 : 1;
+        x.beginPath(); x.moveTo(bx2, by2); x.lineTo(bx2 - mx(0.05) - r() * mx(0.1), by2 + sg * (my(0.1) + r() * my(0.2)));
+        x.lineTo(bx2 + mx(0.05) + r() * mx(0.1), by2); x.fill();
+      }
+      x.fillStyle = 'rgba(86,116,58,0.5)';
+      for (let k = 0; k < 6; k++) { x.beginPath(); x.arc(wx + r() * ww, wy + wh - r() * my(0.3), mx(0.03 + r() * 0.07), 0, 7); x.fill(); }
+    } else {
+      const tone = GLASS[(r() * GLASS.length) | 0];
+      const dg = x.createLinearGradient(0, wy, 0, wy + wh);
+      dg.addColorStop(0, tone[0]); dg.addColorStop(1, tone[1]);
+      x.fillStyle = dg; x.fillRect(wx, wy, ww, wh);
+      x.fillStyle = 'rgba(0,0,0,0.34)'; x.fillRect(wx, wy, ww, Math.max(2, my(0.12)));   // head shadow
+      if (r() < 0.8) {                                                                    // sky reflection
+        const sl = 0.3 + r() * 0.4, o = r() * 0.5;
+        x.fillStyle = `rgba(200,215,220,${0.05 + r() * 0.1})`;
+        x.beginPath(); x.moveTo(wx + ww * o, wy + wh); x.lineTo(wx + ww * (o + sl), wy);
+        x.lineTo(wx + ww * (o + sl + 0.18), wy); x.lineTo(wx + ww * (o + 0.18), wy + wh); x.fill();
+      }
+      if (r() < 0.32) {                                                                   // blinds / curtain
+        x.fillStyle = 'rgba(190,180,150,0.18)';
+        const ch2 = wh * (0.25 + r() * 0.4);
+        x.fillRect(wx + 2, wy + (r() < 0.6 ? my(0.08) : wh - ch2), ww - 4, ch2);
+      }
+    }
+    x.fillStyle = FRAME;                                                                  // mullion + transom
+    const mw = Math.max(2, mx(0.045));
+    for (let k = 1; k < mull[0]; k++) x.fillRect(wx + ww * k / mull[0] - mw / 2, wy, mw, wh);
+    for (let k = 1; k < mull[1]; k++) x.fillRect(wx, wy + wh * k / mull[1] - mw / 2, ww, mw);
+    // rain streaks off the ends of the sill
+    for (let k = 0, n = 1 + (r() * 3 | 0); k < n; k++) {
+      const sx2 = wx - mx(0.08) + r() * (ww + mx(0.16)), sw2 = mx(0.02 + r() * 0.05), sl2 = my(0.2 + r() * 0.7);
+      const sg = x.createLinearGradient(0, wy + wh + my(0.1), 0, wy + wh + my(0.1) + sl2);
+      sg.addColorStop(0, `rgba(44,48,40,${0.16 + r() * 0.2})`); sg.addColorStop(1, 'rgba(44,48,40,0)');
+      x.fillStyle = sg; x.fillRect(sx2, wy + wh + my(0.1), sw2, sl2);
+    }
+  }
+  for (let cy = 0; cy < BLD_CELLS; cy++) for (let cx = 0; cx < BLD_CELLS; cx++) {
+    const py = cy * cell, op = bays[cx];
+    const lit = r() < 0.15, broken = !lit && r() < 0.10;
+    const state = lit ? 'lit' : broken ? 'broken' : 'normal';
+    const mull = kind === 'tile' ? [2, 3] : kind === 'render' ? [3, 4] : [2, 2];
+    if (!op.length) {                                    // solid pier / party wall
+      if (r() < 0.22) {                                  // a vent grille, 0.6 x 0.4 m
+        const gw = mx(0.6), gh = my(0.4), gxp = cx * cell + (cell - gw) / 2, gyp = py + cell * 0.35;
+        x.fillStyle = '#3d3b34'; x.fillRect(gxp, gyp, gw, gh);
+        x.fillStyle = 'rgba(0,0,0,0.4)';
+        for (let v = 0; v < 5; v++) x.fillRect(gxp, gyp + gh * (0.1 + v * 0.18), gw, Math.max(1, gh * 0.09));
+        const vg = x.createLinearGradient(0, gyp + gh, 0, gyp + gh + my(0.8));
+        vg.addColorStop(0, 'rgba(40,42,36,0.26)'); vg.addColorStop(1, 'rgba(40,42,36,0)');
+        x.fillStyle = vg; x.fillRect(gxp, gyp + gh, gw, my(0.8));
+      }
+      continue;
+    }
+    for (const o of op) {
+      const wx = PX(cx, o[0]), ww = (o[1] - o[0]) * cell;
+      const wy = py + PY(o[3]), wh = (o[3] - o[2]) * cell;
+      // brick punches its openings, so they get a stone lintel over and a stone sill under —
+      // both drawn where bldWalls will later MODEL them, so paint and geometry reinforce
+      if (kind === 'brick') {
+        const lh = my(0.13), sh2 = my(0.10), ov = mx(0.09);
+        x.fillStyle = '#a49c8c'; x.fillRect(wx - ov, wy - lh, ww + 2 * ov, lh);
+        xh.fillStyle = '#c8c8c8'; xh.fillRect(wx - ov, wy - lh, ww + 2 * ov, lh);
+        x.fillStyle = '#9c9484'; x.fillRect(wx - ov, wy + wh, ww + 2 * ov, sh2);
+        xh.fillStyle = '#cccccc'; xh.fillRect(wx - ov, wy + wh, ww + 2 * ov, sh2);
+        xr.fillStyle = '#c0c0c0'; xr.fillRect(wx - ov, wy - lh, ww + 2 * ov, lh + wh + sh2);
+      }
+      pane(wx, wy, ww, wh, state, mull);
+    }
+  }
+  // Replay the recorded openings onto rough + height: same layout as the albedo without
+  // spending a single r(), exactly as the concrete sheet does.
+  const rvH = Math.max(2, mx(0.05));
+  for (const p of rects) {
+    xr.fillStyle = '#a8a8a8'; xr.fillRect(p.wx - rvH * 0.6, p.wy - rvH * 0.6, p.ww + rvH * 1.2, p.wh + rvH * 1.2);
+    xr.fillStyle = p.state === 'broken' ? '#cccccc' : '#282828';   // glass is the smooth thing
+    xr.fillRect(p.wx, p.wy, p.ww, p.wh);
+    xh.fillStyle = '#4a4a4a'; xh.fillRect(p.wx - rvH, p.wy - rvH, p.ww + 2 * rvH, p.wh + 2 * rvH);
+    xh.fillStyle = '#6a6a6a'; xh.fillRect(p.wx - rvH * 0.6, p.wy - rvH * 0.6, p.ww + rvH * 1.2, p.wh + rvH * 1.2);
+    xh.fillStyle = '#363636'; xh.fillRect(p.wx, p.wy, p.ww, p.wh);
+  }
+
+  /* ---- 5. storey line + bay joints, drawn last so they read as real edges ------- */
+  for (let cy = 0; cy <= BLD_CELLS; cy++) {
+    const by = (cy * cell) % S, lip = Math.max(2, my(0.05)), sh2 = Math.max(3, my(0.11));
+    if (kind === 'brick') {                              // a projecting brick-on-edge band
+      x.fillStyle = 'rgba(196,172,150,0.30)'; x.fillRect(0, by, S, lip);
+      x.fillStyle = 'rgba(26,24,20,0.34)'; x.fillRect(0, by + lip, S, sh2);
+      xh.fillStyle = '#c8c8c8'; xh.fillRect(0, by - lip, S, lip * 2);
+    } else if (kind === 'render') {                      // a moulded render band + its stain
+      x.fillStyle = 'rgba(224,220,208,0.34)'; x.fillRect(0, by - lip, S, lip * 2);
+      x.fillStyle = 'rgba(30,30,26,0.34)'; x.fillRect(0, by + lip, S, sh2);
+      x.fillStyle = 'rgba(76,84,58,0.16)'; x.fillRect(0, by + lip + sh2, S, sh2 * 2);   // algae under it
+      xh.fillStyle = '#cccccc'; xh.fillRect(0, by - lip, S, lip * 2);
+    } else {                                             // tile: a spandrel closer
+      x.fillStyle = 'rgba(74,80,84,0.42)'; x.fillRect(0, by - lip * 2, S, lip * 4);
+      x.fillStyle = 'rgba(34,36,38,0.34)'; x.fillRect(0, by + lip * 2, S, sh2);
+      xh.fillStyle = '#b4b4b4'; xh.fillRect(0, by - lip * 2, S, lip * 4);
+    }
+    xr.fillStyle = '#c8c8c8'; xr.fillRect(0, by - lip, S, lip * 2);
+    xh.fillStyle = '#565656'; xh.fillRect(0, by + lip, S, sh2 * 0.6);   // the shadow groove
+  }
+  for (let cx = 0; cx < BLD_CELLS; cx++) {               // bay / party joint
+    // render is cast in bays with a real 20 mm movement joint between them; brick and tile
+    // only ever show a hairline party joint
+    const jw = kind === 'render' ? Math.max(2, mx(0.02)) : Math.max(1.5, mx(0.012));
+    x.fillStyle = kind === 'render' ? 'rgba(26,26,22,0.4)' : 'rgba(30,30,26,0.13)';
+    x.fillRect(cx * cell, 0, jw, S);
+    xh.fillStyle = kind === 'render' ? '#3e3e3e' : '#5c5c5c'; xh.fillRect(cx * cell, 0, jw, S);
+  }
+  /* A cast-iron downpipe down some of the solid bays. It is painted, not modelled, but the
+     height field carries a half-round profile so the normal map gives it real cylindrical
+     shading — which is most of what a downpipe is at street distance — plus the dark stain
+     every leaking joint leaves behind it. Solid bays are the ones a pipe would actually run
+     down, and a bay is solid for the WHOLE column, so the pipe tiles vertically. */
+  if (kind !== 'tile') {
+    for (let cx = 0; cx < BLD_CELLS; cx++) {
+      if (bays[cx].length || r() > 0.55) continue;
+      const dw = mx(0.09), dxp = cx * cell + cell * (0.16 + r() * 0.1);
+      const sg = x.createLinearGradient(dxp - dw, 0, dxp + dw * 2, 0);     // damp stain behind it
+      sg.addColorStop(0, 'rgba(46,50,42,0)'); sg.addColorStop(0.5, 'rgba(46,50,42,0.3)'); sg.addColorStop(1, 'rgba(46,50,42,0)');
+      x.fillStyle = sg; x.fillRect(dxp - dw, 0, dw * 3, S);
+      for (let k = 0; k < 5; k++) {                                        // half-round profile
+        const f = k / 4, w2 = dw * (1 - f * 0.8), v = 150 + f * 96;
+        x.fillStyle = `rgba(${58 + f * 34 | 0},${56 + f * 32 | 0},${52 + f * 30 | 0},1)`;
+        x.fillRect(dxp - w2 / 2 + dw * 0.1 * f, 0, w2, S);
+        xh.fillStyle = `rgb(${v | 0},${v | 0},${v | 0})`;
+        xh.fillRect(dxp - w2 / 2 + dw * 0.1 * f, 0, w2, S);
+      }
+      xr.fillStyle = '#c0c0c0'; xr.fillRect(dxp - dw / 2, 0, dw, S);
+      for (let k = 0; k < BLD_CELLS * 2; k++) {                            // socket every ~1.7 m
+        const by2 = k * cell / 2 + cell * 0.12;
+        x.fillStyle = 'rgba(40,38,34,0.85)'; x.fillRect(dxp - dw * 0.75, by2, dw * 1.5, my(0.08));
+        xh.fillStyle = '#dcdcdc'; xh.fillRect(dxp - dw * 0.75, by2, dw * 1.5, my(0.08));
+      }
+    }
+  }
+  // moss creeping up out of the shadow at the foot of each storey
+  for (let cy = 0; cy < BLD_CELLS; cy++) for (let cx = 0; cx < BLD_CELLS; cx++) {
+    if (r() > 0.34) continue;
+    for (let k = 0; k < 14; k++) {
+      x.fillStyle = `rgba(${60 + r() * 30 | 0},${95 + r() * 40 | 0},${40 + r() * 20 | 0},${0.18 + r() * 0.26})`;
+      x.beginPath(); x.arc(cx * cell + r() * cell, (cy + 1) * cell - r() * my(0.7), mx(0.04 + r() * 0.16), 0, 7); x.fill();
+    }
+  }
+
+  /* ---- 6. ship it -------------------------------------------------------------- */
+  const map = canvasTex(c);
+  const rS = S / K.roughDiv, cR2 = makeCanvas(rS, rS);
+  cR2.getContext('2d').drawImage(cR, 0, 0, rS, rS);
+  const eS = S / K.emiDiv, cE2 = makeCanvas(eS, eS);
+  cE2.getContext('2d').drawImage(cE, 0, 0, eS, eS);
+  const rough = canvasTexLinear(cR2), emissive = canvasTex(cE2);
+  // Same reasoning as the concrete sheet: blur the drawn height field first so a 1-texel
+  // fillRect cliff Sobels into a chamfer instead of an ink outline, then take a real
+  // tangent-space normal map (three's bumpMap flattens out at exactly the grazing angles a
+  // street-level camera sees a facade from).
+  wrapBlur(cH, S >= 2048 ? 1.6 : 1.1);
+  const normal = normalFromHeight(cH, kind === 'brick' ? 4.2 : kind === 'tile' ? 3.4 : 3.0);
+  for (const t of [map, emissive, rough, normal]) t.repeat.set(1 / BLD_CELLS, 1 / BLD_CELLS);
+  return { map, emissive, rough, normal, bays };
 }
 
-function makeVineTexture() {
-  const W = 256, H = 512, r = mulberry32(909);
-  const c = makeCanvas(W, H), x = c.getContext('2d');
-  x.clearRect(0, 0, W, H);
-  for (let s = 0; s < 8; s++) {
-    const bx = 14 + s * 32 + r() * 8, amp = 6 + r() * 12, ph = r() * 7;
-    // woody stem with a darker shadow line beside it
-    x.strokeStyle = 'rgba(24,28,18,0.6)'; x.lineWidth = 6 + r() * 4;
-    x.beginPath();
-    for (let yy = 0; yy <= H; yy += 8) x.lineTo(bx + 1.5 + Math.sin(yy * 0.03 + ph) * amp, yy);
-    x.stroke();
-    x.strokeStyle = `rgba(${48 + r() * 22 | 0},${70 + r() * 25 | 0},${34 + r() * 15 | 0},0.95)`;
-    x.lineWidth = 3.5 + r() * 3;
-    x.beginPath();
-    for (let yy = 0; yy <= H; yy += 8) x.lineTo(bx + Math.sin(yy * 0.03 + ph) * amp, yy);
-    x.stroke();
-    // fine side tendrils curling off the stem
-    for (let t = 0; t < 4; t++) {
-      const ty = r() * H, dir = r() < 0.5 ? -1 : 1, tl = 10 + r() * 22;
-      const tx0 = bx + Math.sin(ty * 0.03 + ph) * amp;
-      x.strokeStyle = `rgba(${60 + r() * 25 | 0},${90 + r() * 30 | 0},${45 + r() * 18 | 0},0.8)`;
-      x.lineWidth = 1.2;
-      x.beginPath(); x.moveTo(tx0, ty);
-      x.quadraticCurveTo(tx0 + dir * tl * 0.7, ty + 4, tx0 + dir * tl, ty + 10 + r() * 8);
+/* The forest floor — the global ground plane between the streets and under the trees.
+   This used to be cracked-pavement art (wandering pale-lipped crack polylines up to ~4 m
+   long), which is now the WRONG job: roads and sidewalks carry their own asphalt/concrete
+   sheet via matSurf, so everything this texture covers is soil, moss, litter and root mat.
+   Tiled at GROUND_TILE metres with a Sobel-derived normal map, so raking sun and lamp light
+   find real clumping instead of a flat felt. Drawn at true scale: a leaf is ~10 cm, a twig
+   ~20 cm, a root ridge ~8 cm wide.
+
+   Deep-canopy floors are BROWN-dominant — humus and litter, with moss taking the damp
+   patches. Reading as an even green lawn is the classic tell of a painted-on ground.
+
+   NOTE on wrap(): it replays a mark at the 8 surrounding tile offsets so the sheet is
+   seamless. Every random value a mark uses must therefore be drawn BEFORE the wrap call —
+   drawing inside the callback gives each of the 9 copies different colour/alpha, which
+   defeats the whole point and leaves a visible seam. */
+const GROUND_TILE = 8;                                   // metres per tile (repeat set in worldgen-chunks)
+function makeGroundTexture() {
+  const S = 1024, r = mulberry32(77);                    // 128 px per metre
+  const PM = S / GROUND_TILE;                            // pixels per metre
+  const c = makeCanvas(S, S), x = c.getContext('2d');
+  const cH = makeCanvas(S, S), xh = cH.getContext('2d');
+  const cRough = makeCanvas(S, S), xr = cRough.getContext('2d');
+  x.fillStyle = '#43392e'; x.fillRect(0, 0, S, S);       // damp humus brown
+  xh.fillStyle = '#808080'; xh.fillRect(0, 0, S, S);
+  xr.fillStyle = '#e4e4e4'; xr.fillRect(0, 0, S, S);     // forest floor is very rough
+  const wrap = (fn) => { for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) fn(ox, oy); };
+
+  // 1) soil tone variation — wet hollows and dry rises, metres across
+  for (let i = 0; i < 40; i++) {
+    const px = r() * S, py = r() * S, pr = (0.6 + r() * 2.4) * PM, wet = r() < 0.5, a = 0.08 + r() * 0.14;
+    const g = x.createRadialGradient(px, py, 1, px, py, pr);
+    g.addColorStop(0, wet ? `rgba(30,25,19,${a})` : `rgba(110,95,72,${a * 0.8})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.beginPath(); x.arc(px, py, pr, 0, 7); x.fill();
+  }
+  // 2) moss cushions — damp patches only, not a lawn. Desaturated olive, PROUD of the soil
+  //    and rougher than bare earth.
+  for (let i = 0; i < 90; i++) {
+    const mx = r() * S, my = r() * S, mr = (0.12 + r() * 0.42) * PM;
+    const hue = 78 + r() * 24, sat = 14 + r() * 15, lig = 12 + r() * 9;
+    const a0 = 0.4 + r() * 0.24, a1 = 0.3 + r() * 0.2;
+    wrap((ox, oy) => {
+      const g = x.createRadialGradient(mx + ox, my + oy, 1, mx + ox, my + oy, mr);
+      g.addColorStop(0, `hsla(${hue},${sat}%,${lig + 6}%,${a0})`);
+      g.addColorStop(0.66, `hsla(${hue},${sat}%,${lig}%,${a1})`);
+      g.addColorStop(1, `hsla(${hue},${sat}%,${lig}%,0)`);
+      x.fillStyle = g; x.beginPath(); x.arc(mx + ox, my + oy, mr, 0, 7); x.fill();
+      const gh = xh.createRadialGradient(mx + ox, my + oy, 1, mx + ox, my + oy, mr);
+      gh.addColorStop(0, 'rgba(172,172,172,0.7)'); gh.addColorStop(1, 'rgba(128,128,128,0)');
+      xh.fillStyle = gh; xh.beginPath(); xh.arc(mx + ox, my + oy, mr, 0, 7); xh.fill();
+      xr.fillStyle = 'rgba(255,255,255,0.4)'; xr.beginPath(); xr.arc(mx + ox, my + oy, mr * 0.8, 0, 7); xr.fill();
+    });
+  }
+  // 3) fine moss/lichen speckle so the cushions aren't smooth blobs
+  for (let i = 0; i < 5200; i++) {
+    const sx = r() * S, sy = r() * S, sr = 1 + r() * 2.2;
+    x.fillStyle = `hsla(${76 + r() * 28},${14 + r() * 16}%,${11 + r() * 12}%,${0.12 + r() * 0.2})`;
+    x.beginPath(); x.arc(sx, sy, sr, 0, 7); x.fill();
+  }
+  // 4) grit and small stones pressed into the soil
+  for (let i = 0; i < 2600; i++) {
+    const gx = r() * S, gy = r() * S, gr = 0.9 + r() * 2.6, lit = r() < 0.5;
+    const v = lit ? 132 + r() * 52 : 40 + r() * 34;
+    x.fillStyle = `rgba(${v | 0},${(v * 0.94) | 0},${(v * 0.84) | 0},${0.16 + r() * 0.24})`;
+    x.beginPath(); x.arc(gx, gy, gr, 0, 7); x.fill();
+    const hv = 128 + (lit ? 30 + r() * 36 : -(22 + r() * 26));
+    xh.fillStyle = `rgba(${hv | 0},${hv | 0},${hv | 0},0.7)`;
+    xh.beginPath(); xh.arc(gx, gy, gr, 0, 7); xh.fill();
+  }
+  // 5) leaf litter — fallen leaves ~8-18 cm long, each an ellipse with a midrib, drifted
+  //    (denser in patches, as wind piles them) rather than evenly sprinkled. Kept low in
+  //    contrast: fresh-fallen colour on a forest floor is muted, not autumn-postcard.
+  const drifts = [];
+  for (let i = 0; i < 7; i++) drifts.push([r() * S, r() * S, (1 + r() * 2.2) * PM]);
+  for (let i = 0; i < 760; i++) {
+    let lx, ly;
+    if (r() < 0.62) { const d = drifts[(r() * drifts.length) | 0], a = r() * 7, rr = r() * d[2]; lx = d[0] + Math.cos(a) * rr; ly = d[1] + Math.sin(a) * rr; }
+    else { lx = r() * S; ly = r() * S; }
+    const ll = (0.04 + r() * 0.055) * PM, lw = ll * (0.4 + r() * 0.3), rot = r() * 7;
+    const dry = r() < 0.6;
+    const col = dry
+      ? `rgba(${84 + r() * 34 | 0},${60 + r() * 26 | 0},${30 + r() * 16 | 0},`
+      : `rgba(${50 + r() * 26 | 0},${68 + r() * 26 | 0},${32 + r() * 14 | 0},`;
+    const a = 0.34 + r() * 0.3;
+    wrap((ox, oy) => {
+      x.save(); x.translate(lx + ox, ly + oy); x.rotate(rot);
+      x.fillStyle = col + a + ')';
+      x.beginPath(); x.ellipse(0, 0, ll, lw, 0, 0, 7); x.fill();
+      x.strokeStyle = 'rgba(28,22,15,0.22)'; x.lineWidth = 1;      // midrib
+      x.beginPath(); x.moveTo(-ll, 0); x.lineTo(ll, 0); x.stroke();
+      x.restore();
+      xh.save(); xh.translate(lx + ox, ly + oy); xh.rotate(rot);
+      xh.fillStyle = 'rgba(150,150,150,0.5)';
+      xh.beginPath(); xh.ellipse(0, 0, ll, lw, 0, 0, 7); xh.fill(); xh.restore();
+    });
+  }
+  // 6) twigs — short, straight, dark, with a lit top edge. A few per square metre.
+  for (let i = 0; i < 120; i++) {
+    const tx = r() * S, ty = r() * S, tl = (0.08 + r() * 0.18) * PM, rot = r() * 7, tw = 1.4 + r() * 2;
+    const tc = `rgba(${40 + r() * 22 | 0},${31 + r() * 17 | 0},${22 + r() * 12 | 0},0.7)`;
+    wrap((ox, oy) => {
+      x.save(); x.translate(tx + ox, ty + oy); x.rotate(rot);
+      x.strokeStyle = tc; x.lineWidth = tw;
+      x.beginPath(); x.moveTo(-tl, 0); x.lineTo(tl, 0); x.stroke();
+      x.strokeStyle = 'rgba(142,130,104,0.26)'; x.lineWidth = tw * 0.4;
+      x.beginPath(); x.moveTo(-tl, -tw * 0.3); x.lineTo(tl, -tw * 0.3); x.stroke();
+      x.restore();
+      xh.save(); xh.translate(tx + ox, ty + oy); xh.rotate(rot);
+      xh.strokeStyle = 'rgba(180,180,180,0.65)'; xh.lineWidth = tw;
+      xh.beginPath(); xh.moveTo(-tl, 0); xh.lineTo(tl, 0); xh.stroke(); xh.restore();
+    });
+  }
+  // 7) surface roots creeping through — long, tapering, proud ridges. This is the cue that
+  //    says "giant trees grow here" more than anything else on the floor.
+  for (let i = 0; i < 7; i++) {
+    let px = r() * S, py = r() * S; const pts = [[px, py]];
+    const dir = r() * 7, wob = (r() - 0.5) * 0.5;
+    for (let k = 0; k < 8; k++) {
+      const a = dir + wob * k + (r() - 0.5) * 0.35;
+      px += Math.cos(a) * 0.5 * PM; py += Math.sin(a) * 0.5 * PM; pts.push([px, py]);
+    }
+    const rw = (0.04 + r() * 0.055) * PM;
+    const body = `rgba(${66 + r() * 20 | 0},${52 + r() * 16 | 0},${36 + r() * 12 | 0},0.72)`;
+    wrap((ox, oy) => {
+      const stroke = (ctx, w, st) => {
+        ctx.strokeStyle = st; ctx.lineWidth = w; ctx.lineCap = 'round'; ctx.beginPath();
+        ctx.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) ctx.lineTo(p[0] + ox, p[1] + oy);
+        ctx.stroke();
+      };
+      stroke(x, rw * 2.1, 'rgba(26,20,14,0.3)');                   // contact shadow
+      stroke(x, rw * 1.5, body);
+      stroke(x, rw * 0.55, 'rgba(138,118,90,0.26)');               // lit crest
+      stroke(xh, rw * 1.8, 'rgba(120,120,120,0.5)');
+      stroke(xh, rw * 1.2, 'rgba(200,200,200,0.8)');
+      stroke(xr, rw * 1.4, 'rgba(150,150,150,0.55)');              // bark is smoother than humus
+    });
+  }
+  // 8) damp hollows: darker, smoother, so they catch a low sun as sheen
+  for (let i = 0; i < 10; i++) {
+    const sx = r() * S, sy = r() * S, sr = (0.3 + r() * 0.9) * PM, a = 0.4 + r() * 0.3, a2 = 0.12 + r() * 0.12;
+    const g = xr.createRadialGradient(sx, sy, 1, sx, sy, sr);
+    g.addColorStop(0, `rgba(96,96,96,${a})`); g.addColorStop(1, 'rgba(96,96,96,0)');
+    xr.fillStyle = g; xr.beginPath(); xr.arc(sx, sy, sr, 0, 7); xr.fill();
+    const g2 = x.createRadialGradient(sx, sy, 1, sx, sy, sr);
+    g2.addColorStop(0, `rgba(20,16,12,${a2})`); g2.addColorStop(1, 'rgba(20,16,12,0)');
+    x.fillStyle = g2; x.beginPath(); x.arc(sx, sy, sr, 0, 7); x.fill();
+  }
+  const map = canvasTex(c), rough = canvasTexLinear(cRough);
+  const normal = normalFromHeight(cH, 2.2);
+  return { map, rough, normal };
+}
+
+/* Street surface: the asphalt / sidewalk / tow-path sheet the player actually walks on.
+   Before this existed the streets were untextured flat quads tinted COL.road (~0.03 linear),
+   which is why the floor read as a black void — the detailed makeGroundTexture() sheet is on
+   the plane UNDERNEATH and is covered wherever a road is laid, i.e. everywhere you walk.
+   Albedo stays LIGHT and neutral (same trick as makeBarkTexture) so addRoads' existing
+   per-strip vertex tint still supplies asphalt-dark / sidewalk-pale / mossy-green — one
+   texture set serves every surface type. Sampled with world-space UVs at SURF_TILE metres,
+   so texel density is constant and never stretches with quad size.
+   Normals are derived from a drawn height field via Sobel, so raking lamp/sun light finds
+   real aggregate and crack relief instead of a flat sheet. */
+const SURF_TILE = 2.0;                                   // metres per texture tile
+function makeSurfaceTexture() {
+  const S = 1024, r = mulberry32(9311);
+  const c = makeCanvas(S, S), x = c.getContext('2d');
+  const cH = makeCanvas(S, S), xh = cH.getContext('2d');   // height field → normal map
+  const cR = makeCanvas(S, S), xr = cR.getContext('2d');
+  x.fillStyle = '#a8a49b'; x.fillRect(0, 0, S, S);         // light neutral; vertex colour tints it
+  xh.fillStyle = '#808080'; xh.fillRect(0, 0, S, S);
+  xr.fillStyle = '#d4d4d4'; xr.fillRect(0, 0, S, S);       // mostly rough
+  const wrap = (fn) => { for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) fn(ox, oy); };
+
+  // 1) broad tonal patches — laid/patched at different times, weathered unevenly
+  for (let i = 0; i < 34; i++) {
+    const px = r() * S, py = r() * S, pr = 70 + r() * 210, dark = r() < 0.5, a = 0.05 + r() * 0.09;
+    const g = x.createRadialGradient(px, py, 1, px, py, pr);
+    g.addColorStop(0, dark ? `rgba(70,68,62,${a})` : `rgba(198,194,184,${a})`);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.beginPath(); x.arc(px, py, pr, 0, 7); x.fill();
+  }
+  // 2) aggregate: the stone chips in the mix — the single biggest "this is asphalt" cue.
+  //    Two grades, each with a lit top-left and a shadowed bottom-right in the height field.
+  for (let i = 0; i < 9000; i++) {
+    const gx = r() * S, gy = r() * S, gr = (r() < 0.75 ? 1.1 + r() * 1.9 : 3 + r() * 3.4);
+    const lit = r() < 0.5, v = lit ? 190 + r() * 50 : 60 + r() * 55;
+    x.fillStyle = `rgba(${v | 0},${(v * 0.99) | 0},${(v * 0.94) | 0},${0.16 + r() * 0.26})`;
+    x.beginPath(); x.arc(gx, gy, gr, 0, 7); x.fill();
+    const hv = 128 + (lit ? 40 + r() * 50 : -(30 + r() * 40));
+    xh.fillStyle = `rgba(${hv | 0},${hv | 0},${hv | 0},0.75)`;
+    xh.beginPath(); xh.arc(gx, gy, gr, 0, 7); xh.fill();
+    if (r() < 0.3) { xr.fillStyle = `rgba(${150 + r() * 60 | 0},0,0,0.5)`; xr.beginPath(); xr.arc(gx, gy, gr, 0, 7); xr.fill(); }
+  }
+  // 3) tar seams: the snaking black repair lines, proud of the surface and glossy
+  for (let i = 0; i < 9; i++) {
+    let px = r() * S, py = r() * S; const pts = [[px, py]];
+    for (let k = 0; k < 9; k++) { px += (r() - 0.5) * 150; py += (r() - 0.5) * 150; pts.push([px, py]); }
+    wrap((ox, oy) => {
+      x.strokeStyle = 'rgba(34,32,30,0.5)'; x.lineWidth = 5 + r() * 5;
+      x.beginPath(); x.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+      for (const p of pts) x.lineTo(p[0] + ox, p[1] + oy);
       x.stroke();
-    }
-    for (let yy = 6; yy < H; yy += 12 + r() * 14) {
-      const lx = bx + Math.sin(yy * 0.03 + ph) * amp;
-      const hpx = 85 + (r() - 0.5) * 35, sat = 40 + r() * 25, lig = 34 + r() * 24;
-      const rw = 7 + r() * 8, rh = 4 + r() * 4;
-      x.save(); x.translate(lx, yy); x.rotate(r() * 7);
-      x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
-      x.beginPath(); x.ellipse(0, 0, rw, rh, 0, 0, 7); x.fill();
-      x.fillStyle = `hsl(${hpx},${sat}%,${Math.min(70, lig + 11)}%)`;   // lit half
-      x.beginPath(); x.ellipse(0, -rh * 0.3, rw * 0.8, rh * 0.5, 0, 0, 7); x.fill();
-      x.strokeStyle = `hsl(${hpx},${sat}%,${Math.max(12, lig - 16)}%)`; x.lineWidth = 1;
-      x.beginPath(); x.moveTo(-rw * 0.75, 0); x.lineTo(rw * 0.75, 0); x.stroke();
-      x.restore();
-    }
+      xh.strokeStyle = 'rgba(158,158,158,0.6)'; xh.lineWidth = 6; xh.beginPath();
+      xh.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+      for (const p of pts) xh.lineTo(p[0] + ox, p[1] + oy);
+      xh.stroke();
+      xr.strokeStyle = 'rgba(70,70,70,0.7)'; xr.lineWidth = 6; xr.beginPath();   // tar is smoother → sheens
+      xr.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+      for (const p of pts) xr.lineTo(p[0] + ox, p[1] + oy);
+      xr.stroke();
+    });
   }
-  return canvasTex(c);
+  // 4) cracks: dark fissure with a pale spalled lip, recessed in height, with moss in the deeper ones
+  for (let i = 0; i < 30; i++) {
+    let px = r() * S, py = r() * S; const pts = [[px, py]];
+    for (let k = 0; k < 7; k++) { px += (r() - 0.5) * 110; py += (r() - 0.5) * 110; pts.push([px, py]); }
+    const mossy = r() < 0.45;
+    wrap((ox, oy) => {
+      const line = (ctx, w, st) => {
+        ctx.strokeStyle = st; ctx.lineWidth = w; ctx.beginPath();
+        ctx.moveTo(pts[0][0] + ox, pts[0][1] + oy);
+        for (const p of pts) ctx.lineTo(p[0] + ox, p[1] + oy);
+        ctx.stroke();
+      };
+      line(x, 3.2, 'rgba(206,202,190,0.26)');           // spalled pale lip
+      line(x, 1.5, 'rgba(26,25,22,0.62)');              // the fissure
+      line(xh, 3, 'rgba(74,74,74,0.85)');               // recessed
+      if (mossy) line(x, 2.6, 'rgba(78,104,52,0.4)');   // growth taking the crack
+    });
+  }
+  // 5) wheel tracks: two polished bands where tyres wore the aggregate smooth
+  for (const tb of [0.3, 0.68]) {
+    const bx = tb * S, bw = 96;
+    const g = xr.createLinearGradient(bx - bw, 0, bx + bw, 0);
+    g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(0.5, 'rgba(96,96,96,0.5)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    xr.fillStyle = g; xr.fillRect(bx - bw, 0, bw * 2, S);
+    const g2 = x.createLinearGradient(bx - bw, 0, bx + bw, 0);
+    g2.addColorStop(0, 'rgba(0,0,0,0)'); g2.addColorStop(0.5, 'rgba(58,56,52,0.14)'); g2.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g2; x.fillRect(bx - bw, 0, bw * 2, S);
+  }
+  // 6) organic litter: grit, twigs and blown leaves collecting on a street under a forest
+  for (let i = 0; i < 300; i++) {
+    x.fillStyle = r() < 0.45 ? `rgba(112,86,40,${0.16 + r() * 0.26})` : `rgba(74,100,42,${0.14 + r() * 0.24})`;
+    x.save(); x.translate(r() * S, r() * S); x.rotate(r() * 7);
+    x.fillRect(0, 0, 4 + r() * 7, 2 + r() * 3); x.restore();
+  }
+  // 7) damp/oil sheen patches — smooth, so they catch the sky probe at low sun
+  for (let i = 0; i < 12; i++) {
+    const sx = r() * S, sy = r() * S, sr = 18 + r() * 52;
+    const g = xr.createRadialGradient(sx, sy, 1, sx, sy, sr);
+    g.addColorStop(0, `rgba(56,56,56,${0.4 + r() * 0.3})`); g.addColorStop(1, 'rgba(56,56,56,0)');
+    xr.fillStyle = g; xr.beginPath(); xr.arc(sx, sy, sr, 0, 7); xr.fill();
+    const g2 = x.createRadialGradient(sx, sy, 1, sx, sy, sr);
+    g2.addColorStop(0, `rgba(42,42,40,${0.08 + r() * 0.1})`); g2.addColorStop(1, 'rgba(42,42,40,0)');
+    x.fillStyle = g2; x.beginPath(); x.arc(sx, sy, sr, 0, 7); x.fill();
+  }
+  const map = canvasTex(c), rough = canvasTexLinear(cR);
+  const normal = normalFromHeight(cH, 2.6);
+  for (const t of [map, rough, normal]) t.repeat.set(1, 1);
+  return { map, rough, normal };
 }
 
+/* Sobel a greyscale height canvas into a tangent-space normal map. Three.js only ships
+   bumpMap (a screen-space derivative hack that softens and shimmers at grazing angles);
+   a real normal map gives stable, directional relief — which is what separates "flat sheet
+   with a pattern on it" from "a surface". Wraps at the edges so tiling stays seamless. */
+function normalFromHeight(heightCanvas, strength) {
+  const S = heightCanvas.width, H = heightCanvas.height;
+  const src = heightCanvas.getContext('2d').getImageData(0, 0, S, H).data;
+  const out = makeCanvas(S, H), oc = out.getContext('2d');
+  const img = oc.createImageData(S, H), d = img.data;
+  // Height is lifted into a flat Float64Array and the wrapped neighbour indices are computed
+  // once per row/column. Same arithmetic, same doubles, byte-identical output — but this
+  // helper now runs over ~5 megapixels of sheet at load, and the previous closure did two
+  // modulos and a divide EIGHT times per texel, which alone cost most of a second.
+  const h = new Float64Array(S * H);
+  for (let i = 0, n = S * H; i < n; i++) h[i] = src[i * 4] / 255;
+  const xm = new Int32Array(S), xp = new Int32Array(S);
+  for (let px = 0; px < S; px++) { xm[px] = (px + S - 1) % S; xp[px] = (px + 1) % S; }
+  for (let py = 0; py < H; py++) {
+    const r0 = ((py + H - 1) % H) * S, r1 = py * S, r2 = ((py + 1) % H) * S;
+    for (let px = 0; px < S; px++) {
+      const a = xm[px], c2 = xp[px];
+      // Sobel gradients
+      const tl = h[r0 + a], t = h[r0 + px], tr = h[r0 + c2];
+      const l = h[r1 + a], rr = h[r1 + c2];
+      const bl = h[r2 + a], b = h[r2 + px], br = h[r2 + c2];
+      const gx = (tr + 2 * rr + br) - (tl + 2 * l + bl);
+      const gy = (bl + 2 * b + br) - (tl + 2 * t + tr);
+      let nx = -gx * strength, ny = -gy * strength, nz = 1;
+      const il = 1 / Math.hypot(nx, ny, nz); nx *= il; ny *= il; nz *= il;
+      const o = (r1 + px) * 4;
+      d[o] = (nx * 0.5 + 0.5) * 255; d[o + 1] = (ny * 0.5 + 0.5) * 255; d[o + 2] = (nz * 0.5 + 0.5) * 255; d[o + 3] = 255;
+    }
+  }
+  oc.putImageData(img, 0, 0);
+  return canvasTexLinear(out);   // normal maps are vectors, never sRGB-decoded
+}
+
+/* Blur a height canvas IN PLACE without ever letting the kernel see an edge: the sheet is
+   first laid out 3×3-wrapped on a padded canvas, so the blur reads real neighbours across
+   the tile border and the sheet stays seamless. Used to round hard drawn silhouettes into
+   shoulders before the Sobel — a 1-texel cliff turns into a rim of extreme normals, which
+   reads as an ink outline rather than as a curved surface. */
+function wrapBlur(cv, px) {
+  const W = cv.width, H = cv.height, M = Math.ceil(px * 3) + 2, cx = cv.getContext('2d');
+  const t = makeCanvas(W + 2 * M, H + 2 * M), tt = t.getContext('2d');
+  for (const ox of [-W, 0, W]) for (const oy of [-H, 0, H]) tt.drawImage(cv, ox + M, oy + M);
+  cx.filter = `blur(${px}px)`; cx.drawImage(t, -M, -M); cx.filter = 'none';
+}
+
+/* Bark ------------------------------------------------------------------------------
+   Drawn at TRUE WORLD SCALE. B.bark is a Batch(BARK_TILE), so one sheet always covers
+   BARK_TILE metres of trunk circumference (and 2×BARK_TILE of height) whatever the tree's
+   size — ≈233 px per metre, 1 px ≈ 4 mm. Every feature below is sized in metres via PM.
+   What makes bark read as bark instead of a patterned cylinder, by viewing range:
+     · 20 m — RIDGE PLATES: the 15-41 cm bands between furrows, DOMED in the height field so
+       a low sun or the flashlight finds a lit crest and a shadowed far flank;
+     ·  5 m — FURROWS: deep, broken, wandering vertical fissures separating those plates;
+     ·  1 m — fibrous vertical grain, horizontal flake breaks, pores and lichen crusts.
+   Furrows wander on INTEGER harmonics of the sheet height, so a furrow leaves the top edge
+   exactly where it enters the bottom and the sheet tiles in v with no seam band.
+   Albedo stays LIGHT — the per-tree COL.bark vertex tint (+0.18 jitter) still supplies the
+   brown, exactly as before. Relief is a drawn height canvas run through normalFromHeight():
+   the old bumpMap is a screen-space-derivative hack that softens and shimmers at precisely
+   the grazing angles a flashlight and a low sun make, which is when bark should look best. */
+const BARK_TILE = 2.2;              // metres per sheet in u — matches new Batch(2.2) for B.bark
+function makeBarkTexture() {
+  const W = 512, H = 1024, r = mulberry32(4187);
+  const PM = W / BARK_TILE;                                  // ≈233 px per metre
+  const c = makeCanvas(W, H), x = c.getContext('2d');
+  const cH = makeCanvas(W, H), xh = cH.getContext('2d');     // height field → normal map
+  const cR = makeCanvas(W, H), xr = cR.getContext('2d');
+  // Base is LIGHT on purpose (the per-tree COL.bark vertex tint supplies the brown) and is
+  // set so the finished sheet's mean lands where the old one did — every layer below only
+  // subtracts, so starting at the old base would have shipped trunks a fifth darker.
+  x.fillStyle = '#f2ebdc'; x.fillRect(0, 0, W, H);
+  xh.fillStyle = '#5a5a5a'; xh.fillRect(0, 0, W, H);         // dark = furrow floor; plates rise
+  xr.fillStyle = '#dcdcdc'; xr.fillRect(0, 0, W, H);
+  const WX = [-W, 0, W], WY = [-H, 0, H];
+
+  // Two generations of fissure, which is what real bark has and what a single comb of
+  // cracks never gets: MAJOR furrows 17-40 cm apart bounding the plates, and MINOR
+  // hairlines 4-11 cm apart splitting each plate's face. Both wander on integer harmonics.
+  const mkLane = (p, major) => ({
+    sx: p, major, w: (major ? 0.016 + r() * 0.026 : 0.005 + r() * 0.009) * PM, deep: major && r() < 0.45,
+    a1: (0.008 + r() * 0.03) * PM, p1: 1 + (r() * 2 | 0), ph1: r() * 7,
+    a2: (0.003 + r() * 0.012) * PM, p2: 3 + (r() * 3 | 0), ph2: r() * 7,
+    // Run envelope: how deep the furrow is at each height. Integer harmonics again (v must
+    // tile). Each pass is gated at its own slice of this envelope — a wide shallow pass at a
+    // low threshold runs almost the whole height, the narrow deep pass only survives where
+    // the envelope peaks — so a fissure TAPERS in and out instead of being a dash. A plain
+    // setLineDash gave a chain of identical rounded capsules marching up the trunk.
+    e1: 2 + (r() * 3 | 0), eph1: r() * 7, e2: 3 + (r() * 4 | 0), eph2: r() * 7,
+    thr: (major ? 0.16 : 0.3) + r() * 0.2
+  });
+  const lanes = [], minor = [];
+  for (let p = r() * 0.2 * PM; p < W - 0.05 * PM; p += (0.17 + r() * 0.23) * PM) lanes.push(mkLane(p, 1));
+  for (let p = r() * 0.05 * PM; p < W - 0.01 * PM; p += (0.04 + r() * 0.07) * PM) minor.push(mkLane(p, 0));
+  const N = lanes.length;
+  const LX = (f, yy) => f.sx + Math.sin(yy / H * f.p1 * 6.283185 + f.ph1) * f.a1
+    + Math.sin(yy / H * f.p2 * 6.283185 + f.ph2) * f.a2;
+  const LE = (f, yy) => 0.5 + 0.5 * (Math.sin(yy / H * f.e1 * 6.283185 + f.eph1) * 0.66
+    + Math.sin(yy / H * f.e2 * 6.283185 + f.eph2) * 0.34);
+  // a lane runs the full height, so only u needs the 3× wrap replay. `g` (0..1) gates the
+  // pass on the run envelope: 0 draws the whole height, higher values only the deepest runs.
+  const laneStroke = (ctx, f, style, lw, dx, blur, g) => {
+    ctx.save();
+    if (blur) ctx.filter = `blur(${blur}px)`;
+    ctx.strokeStyle = style; ctx.lineWidth = Math.max(0.7, lw); ctx.lineCap = 'round';
+    const reach = f.a1 + f.a2 + lw + Math.abs(dx || 0) + (blur || 0) * 3;
+    for (const ox of WX) {
+      // only the lanes near a vertical edge need their ±W wrap copies; a filtered stroke
+      // costs a full compositing layer, so skipping the off-canvas ones is most of the sheet
+      if (f.sx + ox < -reach || f.sx + ox > W + reach) continue;
+      ctx.beginPath();
+      let pen = false;
+      for (let yy = -12; yy <= H + 12; yy += 6) {
+        if (g && LE(f, yy) < f.thr * g) { pen = false; continue; }
+        const px = LX(f, yy) + ox + (dx || 0);
+        if (pen) ctx.lineTo(px, yy); else ctx.moveTo(px, yy);
+        pen = true;
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+
+  // 0) metre-scale tonal mottle — weathering, old damp, sun-bleach. Everything else on this
+  //    sheet is centimetre-scale and mips away by 20 m; this is what stops a distant trunk
+  //    from flattening into one uniform brown pole.
+  for (let i = 0; i < 26; i++) {
+    const bx = r() * W, by = r() * H, br = (0.25 + r() * 1.05) * PM, ely = 1.3 + r() * 1.8;
+    const dark = r() < 0.5, a = 0.07 + r() * 0.13;
+    for (const ox of WX) for (const oy of WY) {
+      if (Math.abs(bx + ox - W / 2) > W / 2 + br * ely || Math.abs(by + oy - H / 2) > H / 2 + br * ely) continue;
+      x.save(); x.translate(bx + ox, by + oy); x.scale(1, ely);
+      const g = x.createRadialGradient(0, 0, 1, 0, 0, br);
+      g.addColorStop(0, dark ? `rgba(92,76,54,${a})` : `rgba(248,242,228,${a})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(0, 0, br, 0, 7); x.fill(); x.restore();
+    }
+  }
+
+  // 1) ridge plates — one gradient-filled polygon per gap between neighbouring furrows.
+  //    The cross-plate gradient is the dome; the albedo copy gives each plate its own tone
+  //    (bark is never one colour — plates weather at different rates).
+  for (let i = 0; i < N; i++) {
+    const A = lanes[i], Bp = lanes[(i + 1) % N], wb = (i + 1 === N) ? W : 0;
+    const crest = 196 + r() * 46, tone = 0.05 + r() * 0.11, warm = r() < 0.55;
+    const l0 = A.sx, r0 = Bp.sx + wb;
+    for (const ox of WX) {
+      if (r0 + ox < -40 || l0 + ox > W + 40) continue;   // skip wrap copies that miss the sheet
+      const path = (ctx) => {
+        ctx.beginPath();
+        for (let yy = -12; yy <= H + 12; yy += 9) ctx.lineTo(LX(A, yy) + ox, yy);
+        for (let yy = H + 12; yy >= -12; yy -= 9) ctx.lineTo(LX(Bp, yy) + ox + wb, yy);
+        ctx.closePath();
+      };
+      const cs = `rgb(${crest | 0},${crest | 0},${crest | 0})`;
+      const gh = xh.createLinearGradient(l0 + ox, 0, r0 + ox, 0);
+      gh.addColorStop(0, '#6e6e6e'); gh.addColorStop(0.2, cs); gh.addColorStop(0.8, cs); gh.addColorStop(1, '#6e6e6e');
+      xh.save(); xh.filter = `blur(${(0.012 * PM) | 0}px)`; xh.fillStyle = gh; path(xh); xh.fill(); xh.restore();
+      const ga = x.createLinearGradient(l0 + ox, 0, r0 + ox, 0);
+      const mid = warm ? `rgba(253,249,240,${tone})` : `rgba(126,106,80,${tone})`;
+      ga.addColorStop(0, 'rgba(0,0,0,0)'); ga.addColorStop(0.5, mid); ga.addColorStop(1, 'rgba(0,0,0,0)');
+      x.save(); x.filter = `blur(${(0.02 * PM) | 0}px)`; x.fillStyle = ga; path(x); x.fill(); x.restore();
+    }
+  }
+
+  // 2) furrows — cut through the plates. Wide soft shoulder first, then the firm dark core,
+  //    then a lit lip on one side (painted relief for the face a light never reaches).
+  //    Minor hairlines get the same treatment at a quarter of the depth.
+  for (const f of lanes) {
+    const dw = f.deep ? 1.6 : 1;
+    laneStroke(xh, f, 'rgba(104,104,104,0.8)', f.w * 2.4 * dw, 0, 0.014 * PM, 0.5);
+    laneStroke(xh, f, `rgb(${f.deep ? 32 : 56},${f.deep ? 32 : 56},${f.deep ? 32 : 56})`, f.w * dw, 0, 0.006 * PM, 1);
+    laneStroke(xh, f, `rgb(${f.deep ? 12 : 34},${f.deep ? 12 : 34},${f.deep ? 12 : 34})`, f.w * 0.5 * dw, 0, 0.004 * PM, 1.7);
+    laneStroke(x, f, `rgba(48,38,25,${f.deep ? 0.15 : 0.1})`, f.w * 2.4 * dw, 0, 0.016 * PM, 0.5);
+    laneStroke(x, f, `rgba(24,18,11,${f.deep ? 0.34 : 0.22})`, f.w * dw, 0, 0.005 * PM, 1);
+    laneStroke(x, f, `rgba(16,11,6,${f.deep ? 0.42 : 0.3})`, f.w * 0.5 * dw, 0, 0.004 * PM, 1.7);
+    laneStroke(x, f, 'rgba(255,250,238,0.2)', f.w * 0.5, -(f.w * dw * 0.7 + 0.008 * PM), 0.006 * PM, 1);
+    laneStroke(xr, f, 'rgba(255,255,255,0.45)', f.w * 2 * dw, 0, 0.02 * PM, 0.5);   // furrows hold damp
+  }
+  for (const f of minor) {
+    laneStroke(xh, f, 'rgba(126,126,126,0.7)', f.w * 3.2, 0, 0.008 * PM, 1);
+    laneStroke(x, f, 'rgba(38,29,19,0.18)', f.w * 1.6, 0, 0.004 * PM, 1);
+    laneStroke(x, f, 'rgba(255,250,238,0.11)', f.w, -(f.w * 1.5), 0.004 * PM, 1);
+  }
+
+  // 3+4) grain and flake breaks are drawn CRISP onto two transparent scratch sheets and
+  // composited once through a blur, not stroked 2000× with ctx.filter set: a filtered draw
+  // costs a whole compositing layer in the 2d backend, so the per-stroke version spent half
+  // a second here on its own. The result is the same soft mark either way.
+  const cGa = makeCanvas(W, H), ga2 = cGa.getContext('2d');
+  const cGh = makeCanvas(W, H), gh2 = cGh.getContext('2d');
+  // 3) fibrous vertical grain — 3-70 cm slivers along the plates. This is the 1 m read.
+  //    Kept faint and blurred in the height field: crisp full-strength slivers read as
+  //    scratches gouged into sanded wood rather than as a fibrous surface.
+  for (let i = 0; i < 2000; i++) {
+    const gx = r() * W, gy = r() * H, gl = (0.03 + r() * 0.28) * PM, gw = (0.003 + r() * 0.008) * PM;
+    const dark = r() < 0.55, a = 0.05 + r() * 0.1, tilt = (r() - 0.5) * 0.07 * PM;
+    const hv = dark ? 108 + r() * 20 : 158 + r() * 26;
+    const sa = dark ? `rgba(102,84,58,${a})` : `rgba(255,251,242,${a})`;
+    const sh = `rgba(${hv | 0},${hv | 0},${hv | 0},${Math.min(1, a * 1.1)})`;
+    for (const ox of WX) for (const oy of WY) {
+      if (gx + ox < -8 || gx + ox > W + 8 || gy + oy < -gl || gy + oy > H) continue;
+      for (const q of [[ga2, sa], [gh2, sh]]) {
+        q[0].strokeStyle = q[1]; q[0].lineWidth = gw; q[0].lineCap = 'round';
+        q[0].beginPath(); q[0].moveTo(gx + ox, gy + oy); q[0].lineTo(gx + ox + tilt, gy + oy + gl); q[0].stroke();
+      }
+    }
+  }
+  // 4) horizontal flake breaks — steps where a plate has lifted and split. Blurred and
+  //    length-varied on purpose: crisp, same-length, same-alpha ticks scatter across the
+  //    trunk like hyphens set in a monospace font, which is the giveaway of a stamped mark.
+  for (let i = 0; i < 300; i++) {
+    const fx0 = r() * W, fy0 = r() * H, fl = (0.02 + r() * r() * 0.34) * PM, dy = (r() - 0.5) * 0.03 * PM;
+    const a = 0.07 + r() * 0.13, lw = (0.004 + r() * 0.009) * PM;
+    for (const ox of WX) {
+      if (fx0 + ox < -fl || fx0 + ox > W) continue;
+      ga2.strokeStyle = `rgba(62,48,32,${a})`; ga2.lineWidth = lw; ga2.lineCap = 'round';
+      ga2.beginPath(); ga2.moveTo(fx0 + ox, fy0); ga2.lineTo(fx0 + ox + fl, fy0 + dy); ga2.stroke();
+      ga2.strokeStyle = `rgba(255,250,238,${a * 0.5})`; ga2.lineWidth = lw * 0.7;
+      ga2.beginPath(); ga2.moveTo(fx0 + ox, fy0 + lw); ga2.lineTo(fx0 + ox + fl, fy0 + dy + lw); ga2.stroke();
+      gh2.strokeStyle = `rgba(80,80,80,${Math.min(1, a * 2.2)})`; gh2.lineWidth = lw; gh2.lineCap = 'round';
+      gh2.beginPath(); gh2.moveTo(fx0 + ox, fy0); gh2.lineTo(fx0 + ox + fl, fy0 + dy); gh2.stroke();
+    }
+  }
+  x.save(); x.filter = 'blur(1px)'; x.drawImage(cGa, 0, 0); x.restore();
+  xh.save(); xh.filter = 'blur(1.4px)'; xh.drawImage(cGh, 0, 0); xh.restore();
+
+  // 5) lichen crusts — 2-11 cm pale grey-green scabs on the plate faces, slightly proud and
+  //    rougher than the wood. Reads as age at any distance and breaks the vertical monotony.
+  for (let i = 0; i < 130; i++) {
+    const cx = r() * W, cy = r() * H, cr = (0.02 + r() * 0.09) * PM;
+    const hue = 58 + r() * 46, sat = 6 + r() * 18, lig = 58 + r() * 24, a = 0.07 + r() * 0.15;
+    const dots = [];
+    for (let k = 0; k < 9; k++) dots.push([(r() - 0.5) * cr * 1.7, (r() - 0.5) * cr * 1.7, cr * (0.14 + r() * 0.26), 0.06 + r() * 0.13]);
+    for (const ox of WX) for (const oy of WY) {
+      if (cx + ox < -cr * 2 || cx + ox > W + cr * 2 || cy + oy < -cr * 2 || cy + oy > H + cr * 2) continue;
+      const g = x.createRadialGradient(cx + ox, cy + oy, 1, cx + ox, cy + oy, cr);
+      g.addColorStop(0, `hsla(${hue},${sat}%,${lig}%,${a})`); g.addColorStop(1, `hsla(${hue},${sat}%,${lig}%,0)`);
+      x.fillStyle = g; x.beginPath(); x.arc(cx + ox, cy + oy, cr, 0, 7); x.fill();
+      for (const d of dots) {
+        x.fillStyle = `hsla(${hue},${sat}%,${lig + 10}%,${d[3]})`;
+        x.beginPath(); x.arc(cx + ox + d[0], cy + oy + d[1], d[2], 0, 7); x.fill();
+        xh.fillStyle = `rgba(178,178,178,${d[3] * 0.7})`;
+        xh.beginPath(); xh.arc(cx + ox + d[0], cy + oy + d[1], d[2], 0, 7); xh.fill();
+      }
+      xr.fillStyle = `rgba(255,255,255,${a})`; xr.beginPath(); xr.arc(cx + ox, cy + oy, cr * 0.8, 0, 7); xr.fill();
+    }
+  }
+
+  // 6) lenticels — the sub-centimetre pores. ELONGATED along the grain, not round: round
+  //    dots at any real amplitude turn the trunk into bubble wrap under a raking light.
+  //    Doubles as dither for the height field, which keeps 8-bit quantisation of the broad
+  //    plate gradients from banding into contour rings.
+  for (let i = 0; i < 7000; i++) {
+    const sx = r() * W, sy = r() * H, rx = 0.5 + r() * 0.9, ry = rx * (1.5 + r() * 3);
+    const dark = r() < 0.5, a = 0.03 + r() * 0.055;
+    x.fillStyle = dark ? `rgba(74,60,40,${a})` : `rgba(255,252,246,${a})`;
+    x.beginPath(); x.ellipse(sx, sy, rx, ry, 0, 0, 7); x.fill();
+    const hv = dark ? 116 + r() * 14 : 146 + r() * 16;
+    xh.fillStyle = `rgba(${hv | 0},${hv | 0},${hv | 0},0.28)`;
+    xh.beginPath(); xh.ellipse(sx, sy, rx, ry, 0, 0, 7); xh.fill();
+  }
+
+  const map = canvasTex(c), rough = canvasTexLinear(cR);
+  const normal = normalFromHeight(cH, 2.4);
+  // no repeat here — the bark Batch bakes world-scale UV repeats per piece (Batch.uvWorld)
+  return { map, normal, rough };
+}
+
+/* Canopy leaves — the signature surface of the game, so it gets the most work.
+   · shape: a real lanceolate blade in the ALPHA (bezier margins, a petiole, pinnate
+     venation) instead of the old blob, so the silhouette against the sky reads as foliage;
+   · depth: three layers (deep shade → mid → lit) placed on jittered grids, with ~6% of the
+     cells dropped so genuine sky gaps survive between the leaves — pure scatter instead
+     leaves metre-wide bald patches that read as holes in the crown;
+   · relief: a drawn height field → normal map, so each leaf shades separately. Without it a
+     canopy blob shades as one smooth sphere with a picture painted on it, which is exactly
+     the "flat green card" look.
+   Scale: the sheet repeats LEAF_REPEAT times around a blob. Blobs are 4-8 m across, so at
+   repeat 1 (the old sheet) one leaf was nearly four metres long; at 3 they land near
+   0.4-0.7 m — still big, but these are engineered megaflora.
+   texLeaf stays a bare THREE.Texture (leafDepth shares it, and its sibling vine/grass sheets
+   are scrolled by entities.js through .offset), so the normal map rides along on
+   .userData.normal and SHARES the offset/repeat Vector2 instances — sharing the instance is
+   the only way a wind scroll can never desync albedo from relief. */
+const LEAF_REPEAT = 2;
+function makeLeafTexture() {
+  const S = 1024, r = mulberry32(5150);
+  const c = makeCanvas(S, S), x = c.getContext('2d');
+  const cH = makeCanvas(S, S), xh = cH.getContext('2d');
+  x.clearRect(0, 0, S, S);
+  xh.fillStyle = '#303030'; xh.fillRect(0, 0, S, S);        // gaps sit low; leaves are drawn proud
+
+  // lanceolate blade: base at the origin, tip at +len, two cubics for the margins
+  const blade = (ctx, len, wid, asym) => {
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.bezierCurveTo(len * 0.13, -wid * (1 + asym), len * 0.7, -wid * 0.84, len, 0);
+    ctx.bezierCurveTo(len * 0.7, wid * 0.84, len * 0.13, wid * (1 - asym), 0, 0);
+    ctx.closePath();
+  };
+  const veins = (ctx, len, wid, style, lw) => {
+    ctx.strokeStyle = style; ctx.lineWidth = lw; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(len * 0.02, 0); ctx.lineTo(len * 0.95, 0); ctx.stroke();
+    ctx.lineWidth = lw * 0.62;
+    for (let k = 1; k <= 5; k++) {
+      const t = k / 6, bx = len * t * 0.92, sp = wid * (1 - t * 0.75) * 0.82;
+      ctx.beginPath();
+      ctx.moveTo(bx, 0); ctx.quadraticCurveTo(bx + len * 0.09, -sp * 0.66, bx + len * 0.15, -sp);
+      ctx.moveTo(bx, 0); ctx.quadraticCurveTo(bx + len * 0.09, sp * 0.66, bx + len * 0.15, sp);
+      ctx.stroke();
+    }
+  };
+  // Every random a stamp uses is drawn by the caller BEFORE this runs — the 9 wrap copies
+  // must be byte-identical or the sheet seams.
+  const stamp = (px, py, rot, len, wid, asym, hue, sat, lig, lit, hh) => {
+    const rad = len * 1.3;
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
+      if (px + ox < -rad || px + ox > S + rad || py + oy < -rad || py + oy > S + rad) continue;
+      x.save(); x.translate(px + ox, py + oy); x.rotate(rot);
+      x.strokeStyle = `hsl(${hue - 10},${Math.max(10, sat - 12)}%,${Math.max(8, lig - 6)}%)`;
+      x.lineWidth = Math.max(1, wid * 0.1); x.lineCap = 'round';
+      x.beginPath(); x.moveTo(-len * 0.19, 0); x.lineTo(0, 0); x.stroke();       // petiole
+      const g = x.createLinearGradient(0, -wid, 0, wid);                          // the blade curls
+      g.addColorStop(0, `hsl(${hue},${sat}%,${Math.min(80, lig + 10)}%)`);
+      g.addColorStop(0.56, `hsl(${hue},${sat}%,${lig}%)`);
+      g.addColorStop(1, `hsl(${hue},${sat + 6}%,${Math.max(5, lig - 14)}%)`);
+      x.fillStyle = g; blade(x, len, wid, asym); x.fill();
+      if (lit) {
+        veins(x, len, wid, `hsla(${hue},${sat + 12}%,${Math.max(5, lig - 17)}%,0.7)`, Math.max(0.9, wid * 0.07));
+        x.globalAlpha = 0.2;                                                      // waxy sheen band
+        x.fillStyle = `hsl(${hue - 8},${Math.max(8, sat - 16)}%,${Math.min(90, lig + 28)}%)`;
+        x.save(); x.scale(1, 0.4); x.translate(0, -wid * 0.9); blade(x, len * 0.88, wid, asym); x.fill(); x.restore();
+        x.globalAlpha = 1;
+      }
+      x.restore();
+      xh.save(); xh.translate(px + ox, py + oy); xh.rotate(rot);                  // domed along the midrib
+      const lo = Math.max(0, hh - 52) | 0;
+      const gh = xh.createLinearGradient(0, -wid, 0, wid);
+      gh.addColorStop(0, `rgb(${lo},${lo},${lo})`);
+      gh.addColorStop(0.5, `rgb(${hh | 0},${hh | 0},${hh | 0})`);
+      gh.addColorStop(1, `rgb(${lo},${lo},${lo})`);
+      xh.fillStyle = gh; blade(xh, len, wid, asym); xh.fill();
+      xh.restore();
+    }
+  };
+
+  const twig = (px, py, ang, len, style, lw) => {
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
+      const x0 = px + ox, y0 = py + oy;
+      if (x0 < -len || x0 > S + len || y0 < -len || y0 > S + len) continue;
+      x.strokeStyle = style; x.lineWidth = lw; x.lineCap = 'round';
+      x.beginPath(); x.moveTo(x0, y0); x.lineTo(x0 + Math.cos(ang) * len, y0 + Math.sin(ang) * len); x.stroke();
+    }
+  };
+  // Foliage grows in SPRAYS off a twig, and that clustering is most of what separates a
+  // canopy from confetti: an even scatter of leaves gives a uniform speckle with no
+  // structure at any scale, whatever the leaf shape.
+  const LAYERS = [
+    { g: 8, lig: [16, 13], sat: [20, 16], hh: [98, 20], lit: 0, len: [68, 34], tw: [165, 85] },
+    { g: 9, lig: [25, 15], sat: [24, 18], hh: [140, 24], lit: 1, len: [60, 34], tw: [155, 85] },
+    { g: 10, lig: [34, 18], sat: [27, 20], hh: [182, 32], lit: 1, len: [54, 32], tw: [145, 80] }
+  ];
+  for (const L of LAYERS) {
+    const cell = S / L.g;
+    for (let gy = 0; gy < L.g; gy++) for (let gx = 0; gx < L.g; gx++) {
+      const keep = r(), jx = r(), jy = r(), ang = r() * 7;
+      const tl = L.tw[0] + r() * L.tw[1], n = 5 + (r() * 5 | 0);
+      const dry = r() < 0.1;
+      const hue = dry ? 44 + r() * 20 : 78 + r() * 34;
+      const sat = (dry ? 34 : L.sat[0]) + r() * L.sat[1];
+      const lig0 = (dry ? L.lig[0] + 12 : L.lig[0]);
+      const leaves = [];
+      for (let k = 0; k < n; k++) {
+        const t = 0.1 + (k / n) * 0.9, taper = 1 - t * 0.35, side = k & 1 ? 1 : -1;
+        leaves.push({
+          t, side,
+          len: (L.len[0] + r() * L.len[1]) * taper,
+          widF: 0.24 + r() * 0.12, asym: (r() - 0.5) * 0.5,
+          spread: side * (0.5 + r() * 0.7), jit: (r() - 0.5) * 0.5,
+          lig: lig0 + r() * L.lig[1], hh: L.hh[0] + r() * L.hh[1]
+        });
+      }
+      if (keep < 0.05) continue;
+      const px = (gx + 0.5 + (jx - 0.5) * 1.5) * cell, py = (gy + 0.5 + (jy - 0.5) * 1.5) * cell;
+      twig(px, py, ang, tl, `hsl(${hue - 14},${Math.max(10, sat - 18)}%,${Math.max(7, lig0 - 4)}%)`, 2.2);
+      for (const lf of leaves)
+        stamp(px + Math.cos(ang) * tl * lf.t, py + Math.sin(ang) * tl * lf.t,
+          ang + lf.spread + lf.jit, lf.len, lf.len * lf.widF, lf.asym,
+          hue, sat, lf.lig, L.lit, lf.hh);
+    }
+  }
+
+  wrapBlur(cH, 2);                                          // leaf edges become shoulders, not cliffs
+  const map = canvasTex(c);
+  const normal = normalFromHeight(cH, 1.6);
+  map.repeat.set(LEAF_REPEAT, LEAF_REPEAT);
+  normal.offset = map.offset; normal.repeat = map.repeat;   // shared instances can never desync
+  map.userData.normal = normal;
+  return map;
+}
+
+/* Vines: growth clinging to a wall, not paint on it. Real ivy silhouettes in the alpha (a
+   heart base and three shallow lobes), a woody stem carrying its own contact shadow, and a
+   height field → normal map so every leaf has an edge and a curl for the light to find.
+   The quads are [0,0,1,vRep] with vRep ≈ height/2 m, so a sheet is roughly 0.9 m wide by 2 m
+   tall and leaves land at 6-13 cm. Stems wander on INTEGER harmonics, so a strip repeated
+   ten times up a facade never shows the same wiggle at the same height twice.
+   Returns a bare Texture — entities.js scrolls texVine.offset for the wind shimmer. */
+function makeVineTexture() {
+  const W = 512, H = 1024, r = mulberry32(909);
+  const c = makeCanvas(W, H), x = c.getContext('2d');
+  const cH = makeCanvas(W, H), xh = cH.getContext('2d');
+  x.clearRect(0, 0, W, H);
+  xh.fillStyle = '#2c2c2c'; xh.fillRect(0, 0, W, H);
+  const WY = [-H, 0, H];
+  // ivy leaf, drawn tip-up in local coords: heart base, three shallow lobes
+  const ivy = (ctx, s) => {
+    ctx.beginPath();
+    ctx.moveTo(0, -s);
+    ctx.bezierCurveTo(s * 0.42, -s * 0.72, s * 0.5, -s * 0.5, s * 0.56, -s * 0.2);
+    ctx.bezierCurveTo(s * 0.98, -s * 0.42, s * 1.06, s * 0.16, s * 0.62, s * 0.4);
+    ctx.bezierCurveTo(s * 0.34, s * 0.54, s * 0.16, s * 0.5, 0, s * 0.42);
+    ctx.bezierCurveTo(-s * 0.16, s * 0.5, -s * 0.34, s * 0.54, -s * 0.62, s * 0.4);
+    ctx.bezierCurveTo(-s * 1.06, s * 0.16, -s * 0.98, -s * 0.42, -s * 0.56, -s * 0.2);
+    ctx.bezierCurveTo(-s * 0.5, -s * 0.5, -s * 0.42, -s * 0.72, 0, -s);
+    ctx.closePath();
+  };
+  for (let s = 0; s < 7; s++) {
+    const bx = 18 + s * 70 + r() * 22, amp = 10 + r() * 22, ph = r() * 7, hz = 1 + (r() * 2 | 0);
+    const stemW = 5 + r() * 5;
+    const stemCol = `rgba(${44 + r() * 24 | 0},${58 + r() * 22 | 0},${34 + r() * 14 | 0},0.96)`;
+    const sx = (yy) => bx + Math.sin(yy / H * hz * 6.283185 + ph) * amp;
+    const stemPath = (ctx, dx) => {
+      ctx.beginPath();
+      for (let yy = -12; yy <= H + 12; yy += 10) ctx.lineTo(sx(yy) + (dx || 0), yy);
+    };
+    x.lineCap = 'round';
+    x.strokeStyle = 'rgba(14,18,10,0.5)'; x.lineWidth = stemW * 1.9;              // contact shadow
+    stemPath(x, stemW * 0.55); x.stroke();
+    x.strokeStyle = stemCol; x.lineWidth = stemW; stemPath(x, 0); x.stroke();
+    x.strokeStyle = 'rgba(150,160,120,0.3)'; x.lineWidth = stemW * 0.3;           // lit side of the stem
+    stemPath(x, -stemW * 0.3); x.stroke();
+    xh.lineCap = 'round';
+    xh.strokeStyle = '#8c8c8c'; xh.lineWidth = stemW * 1.5; stemPath(xh, 0); xh.stroke();
+    xh.strokeStyle = '#b4b4b4'; xh.lineWidth = stemW * 0.7; stemPath(xh, 0); xh.stroke();
+    for (let t = 0; t < 7; t++) {                                                 // tendrils gripping the wall
+      const ty = r() * H, dir = r() < 0.5 ? -1 : 1, tl = 14 + r() * 34, drop = 10 + r() * 16;
+      const tc = `rgba(${58 + r() * 26 | 0},${80 + r() * 30 | 0},${44 + r() * 18 | 0},0.85)`;
+      for (const oy of WY) {
+        if (ty + oy < -60 || ty + oy > H + 60) continue;
+        x.strokeStyle = tc; x.lineWidth = 1.6; x.beginPath();
+        x.moveTo(sx(ty), ty + oy);
+        x.quadraticCurveTo(sx(ty) + dir * tl * 0.7, ty + oy + 5, sx(ty) + dir * tl, ty + oy + drop);
+        x.stroke();
+      }
+    }
+    let yy = 6 + r() * 20, side = 1;                                              // leaves alternate sides
+    while (yy < H) {
+      const ls = 14 + r() * 24, rot = (r() - 0.5) * 1.5 + (side > 0 ? 2.6 : -2.6);
+      const off = side * (6 + r() * 12);
+      // age variation: most green, some yellowing, a few brown-dead still hanging on. A
+      // strand of identically-coloured leaves reads as printed wallpaper, not as growth.
+      const age = r();
+      const hue = age > 0.9 ? 28 + r() * 16 : age > 0.76 ? 52 + r() * 14 : 82 + (r() - 0.5) * 40;
+      const sat = age > 0.76 ? 30 + r() * 22 : 26 + r() * 26;
+      const lig = age > 0.76 ? 26 + r() * 20 : 14 + r() * 26;
+      const hh = 150 + r() * 60, lo = Math.max(0, hh - 62) | 0;
+      const lxp = sx(yy) + off;
+      for (const oy of WY) {
+        if (yy + oy < -ls * 2 || yy + oy > H + ls * 2) continue;
+        x.save(); x.translate(lxp, yy + oy); x.rotate(rot);
+        const g = x.createLinearGradient(0, -ls, 0, ls);
+        g.addColorStop(0, `hsl(${hue},${sat}%,${Math.min(74, lig + 13)}%)`);
+        g.addColorStop(1, `hsl(${hue},${sat + 6}%,${Math.max(6, lig - 9)}%)`);
+        x.fillStyle = g; ivy(x, ls); x.fill();
+        x.strokeStyle = `hsla(${hue},${sat}%,${Math.min(84, lig + 30)}%,0.55)`;
+        x.lineWidth = 1.1; x.lineCap = 'round'; x.beginPath();                     // palmate veins
+        for (const a of [-1.05, -0.5, 0, 0.5, 1.05]) {
+          x.moveTo(0, ls * 0.36);
+          x.lineTo(Math.sin(a) * ls * 0.72, ls * 0.36 - Math.cos(a) * ls * 1.1);
+        }
+        x.stroke(); x.restore();
+        xh.save(); xh.translate(lxp, yy + oy); xh.rotate(rot);
+        const gh = xh.createLinearGradient(0, -ls, 0, ls);
+        gh.addColorStop(0, `rgb(${hh | 0},${hh | 0},${hh | 0})`);
+        gh.addColorStop(1, `rgb(${lo},${lo},${lo})`);
+        xh.fillStyle = gh; ivy(xh, ls); xh.fill();
+        xh.restore();
+      }
+      yy += 16 + r() * 22; side = -side;
+    }
+  }
+  wrapBlur(cH, 2);
+  const map = canvasTex(c);
+  const normal = normalFromHeight(cH, 1.7);
+  normal.offset = map.offset; normal.repeat = map.repeat;   // entities.js scrolls .offset for wind
+  map.userData.normal = normal;
+  return map;
+}
+
+/* Grass tufts: two crossed quads per tuft, one full sheet each, tuft ≈ 0.5-0.9 m — so the
+   sheet is about that wide and a blade wants to be ~6 mm. The old sheet packed 100 blades of
+   5-12 px into 256 px, which fused into a solid green wedge. Now: fewer, finer, properly
+   tapered blades in three depth layers, a dark root shadow along the bottom, dry blades and
+   seed heads mixed in, and a broad tonal drift so the sheet isn't one flat green.
+   Blades wrap in u so the wind scroll (entities.js sets texGrass.offset.x) can never slide a
+   cut edge into view. Returns a bare Texture for the same reason. */
 function makeGrassTexture() {
-  const S = 256, r = mulberry32(303);
+  const S = 512, r = mulberry32(303);
   const c = makeCanvas(S, S), x = c.getContext('2d');
   x.clearRect(0, 0, S, S);
-  for (let i = 0; i < 100; i++) {
-    const bx = r() * S, h = 90 + r() * 150, bend = (r() - 0.5) * 70, w = 5 + r() * 7;
-    // ~1 in 6 blades dried out; the rest green with a brighter edge stroke
-    const dry = r() < 0.16;
-    const hpx = dry ? 52 + r() * 12 : 80 + (r() - 0.5) * 30;
-    const sat = dry ? 38 + r() * 15 : 42 + r() * 25;
-    const lig = dry ? 38 + r() * 18 : 30 + r() * 22;
-    x.fillStyle = `hsl(${hpx},${sat}%,${lig}%)`;
-    x.beginPath();
-    x.moveTo(bx - w / 2, S);
-    x.quadraticCurveTo(bx + bend * 0.3, S - h * 0.6, bx + bend, S - h);
-    x.quadraticCurveTo(bx + bend * 0.3 + w * 0.4, S - h * 0.6, bx + w / 2, S);
-    x.fill();
-    // lit edge along one side of the blade
-    x.strokeStyle = `hsl(${hpx},${sat}%,${Math.min(72, lig + 16)}%)`; x.lineWidth = 1.4;
-    x.beginPath();
-    x.moveTo(bx - w / 2, S);
-    x.quadraticCurveTo(bx + bend * 0.3, S - h * 0.6, bx + bend, S - h);
-    x.stroke();
+  const LAYERS = [
+    { n: 46, lig: [20, 13], sat: [30, 16], h: [0.42, 0.34], w: [3.5, 4.5] },
+    { n: 40, lig: [30, 15], sat: [36, 20], h: [0.55, 0.36], w: [4.5, 5] },
+    { n: 34, lig: [38, 19], sat: [40, 24], h: [0.66, 0.32], w: [5, 6] }
+  ];
+  for (const L of LAYERS) {
+    for (let i = 0; i < L.n; i++) {
+      const bx = r() * S, h = (L.h[0] + r() * L.h[1]) * S, bend = (r() - 0.5) * S * 0.34;
+      const w = L.w[0] + r() * L.w[1];
+      const dry = r() < 0.15, seed = r() < 0.12;
+      const hue = dry ? 48 + r() * 14 : 76 + (r() - 0.5) * 34;
+      const sat = (dry ? 32 : L.sat[0]) + r() * L.sat[1];
+      const lig = (dry ? L.lig[0] + 12 : L.lig[0]) + r() * L.lig[1];
+      const tipL = Math.min(82, lig + 16 + r() * 10);
+      for (const ox of [-S, 0, S]) {
+        const b = bx + ox;
+        if (b + Math.min(0, bend) < -w * 2 || b + Math.max(0, bend) > S + w * 2) continue;
+        // two quadratics meeting at a point, so the tip is a real taper and not a cut quad
+        const g = x.createLinearGradient(0, S, 0, S - h);
+        g.addColorStop(0, `hsl(${hue},${sat}%,${Math.max(4, lig - 12)}%)`);       // root shadow
+        g.addColorStop(0.35, `hsl(${hue},${sat}%,${lig}%)`);
+        g.addColorStop(1, `hsl(${hue - 6},${Math.max(12, sat - 8)}%,${tipL}%)`);  // sun-caught tip
+        x.fillStyle = g;
+        // A real blade is NARROW at the sheath, widest around a third up, and ends in a
+        // point. Straight-sided blades all rooted on the bottom row merge into one opaque
+        // band, which is what made a tuft read as a dark card standing in the grass.
+        x.beginPath();
+        x.moveTo(b - w * 0.3, S);
+        x.quadraticCurveTo(b + bend * 0.28 - w * 0.62, S - h * 0.55, b + bend, S - h);
+        x.quadraticCurveTo(b + bend * 0.28 + w * 0.66, S - h * 0.55, b + w * 0.3, S);
+        x.closePath(); x.fill();
+        x.strokeStyle = `hsla(${hue},${sat}%,${Math.min(88, tipL + 8)}%,0.5)`;    // lit edge
+        x.lineWidth = 1.1; x.lineCap = 'round';
+        x.beginPath();
+        x.moveTo(b - w * 0.3, S);
+        x.quadraticCurveTo(b + bend * 0.28 - w * 0.62, S - h * 0.55, b + bend, S - h);
+        x.stroke();
+        if (seed) {                                                               // a dry seed head
+          x.fillStyle = `hsla(${44 + hue * 0.1},${sat}%,${Math.min(76, lig + 22)}%,0.85)`;
+          x.save(); x.translate(b + bend, S - h); x.rotate(Math.atan2(bend, -h));
+          x.beginPath(); x.ellipse(0, -h * 0.05, w * 0.7, h * 0.07, 0, 0, 7); x.fill(); x.restore();
+        }
+      }
+    }
   }
+  // broad tonal drift + a shadowed root line, so the tuft isn't one flat green card
+  x.globalCompositeOperation = 'source-atop';
+  const gd = x.createLinearGradient(0, S, S, 0);
+  gd.addColorStop(0, 'rgba(14,26,10,0.3)'); gd.addColorStop(0.5, 'rgba(0,0,0,0)');
+  gd.addColorStop(1, 'rgba(196,208,140,0.14)');
+  x.fillStyle = gd; x.fillRect(0, 0, S, S);
+  const gr = x.createLinearGradient(0, S, 0, S * 0.88);
+  gr.addColorStop(0, 'rgba(10,18,8,0.34)'); gr.addColorStop(1, 'rgba(10,18,8,0)');
+  x.fillStyle = gr; x.fillRect(0, S * 0.88, S, S * 0.12);
+  x.globalCompositeOperation = 'source-over';
   return canvasTex(c);
 }
 
@@ -807,12 +1866,16 @@ function makeMoonTexture() {
 }
 
 const texB = makeBuildingTextures();
+const texBrick = makeFacadeAtlas('brick');
+const texRender = makeFacadeAtlas('render');
+const texTile = makeFacadeAtlas('tile');
 const texG = makeGroundTexture();
-const texGround = texG.map, texGroundBump = texG.bump, texGroundRough = texG.rough;
+const texGround = texG.map, texGroundNormal = texG.normal, texGroundRough = texG.rough;
 const texLeaf = makeLeafTexture();
 const texBark = makeBarkTexture();
 const texVine = makeVineTexture();
 const texGrass = makeGrassTexture();
+const texSurf = makeSurfaceTexture();
 const texSun = makeGlowSprite('rgba(255,255,255,1)', 'rgba(255,220,160,0.55)');
 const texSoft = makeGlowSprite('rgba(255,255,255,0.9)', 'rgba(255,255,255,0.25)');
 const texMoon = makeMoonTexture();
@@ -820,26 +1883,113 @@ const texMoon = makeMoonTexture();
 /* ------------------------------------------------------------- materials -- */
 const matPlain = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.94, metalness: 0 });
 // Tree bark: trunks/roots/limbs (batched through B.bark). Vertex colour still carries
-// the per-tree COL.bark tint + jitter; the map/bump/rough add fissured wood relief.
+// the per-tree COL.bark tint + jitter; the map/normal/rough add the fissured wood relief.
+// A real tangent-space normalMap replaced the old bumpMap: bumpMap perturbs from screen-space
+// derivatives, so on a trunk lit from the side it flattened out exactly where the furrows
+// should have been deepest, and crawled as the camera moved.
 const matBark = new THREE.MeshStandardMaterial({
   vertexColors: true, map: texBark.map,
-  bumpMap: texBark.bump, bumpScale: 0.2,
+  normalMap: texBark.normal, normalScale: new THREE.Vector2(1.15, 1.15),
   roughnessMap: texBark.rough, roughness: 1, metalness: 0
+});
+// Street surface (asphalt / sidewalk / tow-path). Vertex colour carries the per-strip tint
+// that addRoads already rolls; the maps supply aggregate, cracks, seams and wear. envMap at
+// low intensity lets damp patches pick up the sky probe, which is what makes wet asphalt read
+// as a surface rather than a shade of grey.
+const matSurf = new THREE.MeshStandardMaterial({
+  vertexColors: true, map: texSurf.map,
+  normalMap: texSurf.normal, normalScale: new THREE.Vector2(0.85, 0.85),
+  roughnessMap: texSurf.rough, roughness: 1, metalness: 0,
+  envMap: envRT.texture, envMapIntensity: 0.22
 });
 const matBld = new THREE.MeshStandardMaterial({
   vertexColors: true, map: texB.map, emissiveMap: texB.emissive,
   emissive: srgb(0xffc27a), emissiveIntensity: 0,
-  roughness: 1, roughnessMap: texB.rough, bumpMap: texB.bump, bumpScale: 0.5,
+  roughness: 1, roughnessMap: texB.rough,
+  normalMap: texB.normal, normalScale: new THREE.Vector2(1, 1),
   envMap: envRT.texture, envMapIntensity: 0.6, metalness: 0
 });
+/* The other three facade materials. One material (and one Batch, see worldgen-anomalies'
+   buildChunk) per building material, chosen per building by district — brick districts and
+   concrete districts now differ in what they are MADE OF, not only in their proportions. */
+function makeBldMaterial(tex, envI, nrm) {
+  return new THREE.MeshStandardMaterial({
+    vertexColors: true, map: tex.map, emissiveMap: tex.emissive,
+    emissive: srgb(0xffc27a), emissiveIntensity: 0,
+    roughness: 1, roughnessMap: tex.rough,
+    normalMap: tex.normal, normalScale: new THREE.Vector2(nrm, nrm),
+    envMap: envRT.texture, envMapIntensity: envI, metalness: 0
+  });
+}
+const matBldBrick = makeBldMaterial(texBrick, 0.35, 1.15);   // fired clay: matte, deep joints
+const matBldRender = makeBldMaterial(texRender, 0.4, 1.0);   // painted render: matte, soft relief
+const matBldTile = makeBldMaterial(texTile, 0.95, 0.9);      // glazed tile: it is glaze, it reflects
+/* Night lighting: worldgen-chunks' updateSky drives the lit-window glow by writing
+   matBld.emissiveIntensity once a frame, and that file is not ours to touch. Rather than
+   leave three-quarters of the city's windows dead after dark, matBld's emissiveIntensity
+   becomes an accessor that fans the value out to its siblings. three reads the property in
+   WebGLMaterials (uniforms.emissive * emissiveIntensity), so a getter is transparent to it. */
+const BLD_MATS = [matBld, matBldBrick, matBldRender, matBldTile];
+{
+  let _emi = matBld.emissiveIntensity;
+  Object.defineProperty(matBld, 'emissiveIntensity', {
+    get() { return _emi; },
+    set(v) { _emi = v; for (let i = 1; i < BLD_MATS.length; i++) BLD_MATS[i].emissiveIntensity = v; },
+    configurable: true, enumerable: true
+  });
+}
+/* The registry worldgen-builders reads: material key → the per-chunk Batch name it draws
+   into, the material that batch is meshed with, and the atlas's published opening table
+   (used to hang modelled sills/reveals on the painted windows). Keep `batch` in step with
+   buildChunk's B = {...} and its mesh list. */
+const FACADES = {
+  concrete: { batch: 'bld', mat: matBld, bays: texB.bays },
+  brick: { batch: 'bldB', mat: matBldBrick, bays: texBrick.bays },
+  render: { batch: 'bldR', mat: matBldRender, bays: texRender.bays },
+  tile: { batch: 'bldT', mat: matBldTile, bays: texTile.bays }
+};
+// Canopy leaves. normalMap gives each leaf its own shading so a blob stops reading as one
+// smooth sphere with foliage painted on it; roughness below 1 leaves a waxy sheen on the
+// leaves that face the sun, which is most of what says "living plant" at midday.
 const matLeaf = new THREE.MeshStandardMaterial({
-  map: texLeaf, vertexColors: true, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 1, metalness: 0
+  map: texLeaf, normalMap: texLeaf.userData.normal, normalScale: new THREE.Vector2(0.8, 0.8),
+  vertexColors: true, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.9, metalness: 0
 });
+/* Backlit leaves glow, and that is most of what a canopy looks like from underneath.
+   MeshStandardMaterial has no transmission, so this adds a cheap two-lobe back-scatter term:
+   a broad wrap lobe for light landing on the far face of a leaf, plus a tight forward lobe
+   for looking straight into the sun through one.
+   The hook point matters. r152's <lights_fragment_begin> runs its RE_Direct loops in the
+   order point → spot → directional, and `IncidentLight directLight` is declared once outside
+   them — so immediately AFTER the include, directLight still holds the last DIRECTIONAL
+   light (this scene has exactly one, the sun), already attenuated by its shadow map. That
+   gives a shadowed leaf no glow, for free. The term goes into indirectDiffuse, which
+   <lights_fragment_end> only ever adds to. */
+matLeaf.onBeforeCompile = (shader) => {
+  const A = '#include <lights_fragment_begin>';
+  if (shader.fragmentShader.indexOf(A) === -1) {
+    console.error('CANOPY leaf translucency: anchor "' + A + '" not found in the r152 shader — leaves stay opaque');
+    return;
+  }
+  shader.fragmentShader = shader.fragmentShader.replace(A, A + '\n'
+    + '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )\n'
+    + '  {\n'
+    + '    float cnpBack = max( 0.0, - dot( normal, directLight.direction ) );\n'
+    + '    float cnpFwd  = pow( max( 0.0, - dot( geometry.viewDir, directLight.direction ) ), 3.0 );\n'
+    // chlorophyll transmits yellow-green, not the leaf's own reflected green; without the
+    // warm bias the far side of a crown goes neon
+    + '    vec3 cnpTint = diffuseColor.rgb * vec3( 1.15, 1.0, 0.55 );\n'
+    + '    reflectedLight.indirectDiffuse += directLight.color * cnpTint * cnpBack * ( 0.30 + 0.95 * cnpFwd );\n'
+    + '  }\n'
+    + '#endif\n');
+};
+matLeaf.customProgramCacheKey = () => 'canopy-leaf-translucency';
 const matVine = new THREE.MeshStandardMaterial({
-  map: texVine, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 1, metalness: 0
+  map: texVine, normalMap: texVine.userData.normal, normalScale: new THREE.Vector2(1, 1),
+  vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.86, metalness: 0
 });
 const matGrass = new THREE.MeshStandardMaterial({
-  map: texGrass, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 1, metalness: 0
+  map: texGrass, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.92, metalness: 0
 });
 const matGlow = new THREE.MeshStandardMaterial({
   vertexColors: true, emissive: srgb(0x5fe8b0), emissiveIntensity: 0, roughness: 0.7, metalness: 0
@@ -1089,7 +2239,15 @@ const COL = {
   vine: srgb(0x74975a),
   glowPlant: srgb(0x1f4436),
   deadwood: srgb(0x4f463c),
-  road: srgb(0x33343a), sidewalk: srgb(0x74736a), dash: srgb(0xc4c1a6),
+  sidewalk: srgb(0x74736a),
+  // Street-surface tints — these MULTIPLY matSurf's deliberately light albedo (~0.40 linear),
+  // so they read brighter here than a standalone colour would. The old COL.road (0x33343a,
+  // ~0.033 linear) went onto an untextured quad and landed at ~0.013 final albedo — darker
+  // than coal, which is why every street was a black void. Asphalt's real albedo is ~0.06,
+  // weathered concrete ~0.2; these are tuned to land there after the texture multiply.
+  // Warm-neutral, not blue: the hemisphere light is sky-cyan, so a blue-biased tint drove the
+  // asphalt navy. Real weathered bitumen is a warm grey that greys further as it oxidises.
+  surfRoad: srgb(0x77726a), surfWalk: srgb(0xb6b2a6), surfDash: srgb(0xe8e4d2),
   lampPole: srgb(0x3d443c), wire: srgb(0x17171a), rust: srgb(0x6a4a35),
   wood: srgb(0x4a3b2e), tire: srgb(0x151517)
 };

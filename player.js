@@ -17,6 +17,15 @@ const player = {
   sunE: 0                                                  // smoothed sun-exposure factor (0=full shade, 1=raw sun)
 };
 let lastShade = player.pos.clone();
+/* Terrain: every teleport (R-key recall, blackout, heatstroke, story/verge warps) used to be
+   safe because the ground was the constant y=0. Now it is terrainY, so a recalled position
+   can be buried. Lift the feet onto the local ground without ever pushing them DOWN — a
+   recall onto a rooftop or a canopy pad must keep its height. */
+function groundTeleport(p) {
+  const ty = terrainY(p.x, p.z);
+  if (p.y < ty) p.y = ty;
+  return p;
+}
 // Permanent sprint boost, awarded after golding all five Trials (persisted).
 let sprintBoost = false;
 try { sprintBoost = localStorage.getItem('canopy.sprintboost') === '1'; } catch (e) { }
@@ -27,7 +36,7 @@ addEventListener('keydown', e => {
   keys[e.code] = true;
   if (e.code === 'KeyM') toggleAudio();
   if (e.code === 'KeyF' && started) { flashOn = !flashOn; hint(flashOn ? 'flashlight on' : 'flashlight off', 1.2); }
-  if (e.code === 'KeyR' && started) { player.pos.copy(lastShade); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
+  if (e.code === 'KeyR' && started) { groundTeleport(player.pos.copy(lastShade)); player.vel.set(0, 0, 0); player.heat = Math.min(player.heat, 40); }
   // Lifts: Q cranks a winch lift up, C down. Discrete presses only — auto-repeat (holding) is
   // ignored, so the climb is made of deliberate cranks. Target = the lift you're riding, else the
   // nearest within reach (recalls a stranded platform from the deck or ground). e.repeat guard is
@@ -265,10 +274,20 @@ function stepPlayer(dt) {
 
   collectColliders(p.pos.x, p.pos.z, nearby);
 
-  // --- horizontal resolve: walls & trunks ---
+  /* --- horizontal resolve: walls & trunks ---
+     Terrain / collision contract: colData.solids are { x0,z0,x1,z1, y0, h, vine } and
+     colData.trunks are { x,z,r, y0, h } where y0 is the BASE world height (the terrain the
+     prop stands on, or a roof/deck for things founded up in the air) and `h` stays RELATIVE
+     to it — so the absolute top is y0 + h. `h` deliberately did NOT become absolute: several
+     worldgen passes filter these same arrays by height (`s.h >= 4/5/6/8` for shrines,
+     mailboxes, laundry, cobwebs, bough-road roofs; `t.h >= 14` for real trees) and those
+     filters gate control flow that changes how many rng() calls a chunk makes. Shifting h by
+     the ±1.1 m relief would flip memberships near those thresholds and re-roll the world.
+     y0 is optional-by-convention: `|| 0` everywhere, so any array row from an unconverted
+     source still behaves exactly as it did when the world was flat. */
   let climbNormal = null, climbSolid = null;
   for (const s of nearby.solids) {
-    if (feet() > s.h - 0.35) continue;               // above the roofline: no wall
+    if (feet() > (s.y0 || 0) + s.h - 0.35) continue;  // above the roofline: no wall
     const cxp = clamp(p.pos.x, s.x0, s.x1), czp = clamp(p.pos.z, s.z0, s.z1);
     let dx = p.pos.x - cxp, dz = p.pos.z - czp;
     let d = Math.hypot(dx, dz);
@@ -279,13 +298,14 @@ function stepPlayer(dt) {
     if (s.vine) { climbNormal = { x: dx / d, z: dz / d }; climbSolid = s; }
   }
   for (const t of nearby.trunks) {
-    if (feet() > t.h) continue;
+    const tTop = (t.y0 || 0) + t.h;
+    if (feet() > tTop) continue;
     let dx = p.pos.x - t.x, dz = p.pos.z - t.z;
     let d = Math.hypot(dx, dz);
     const rr = t.r + PR * 0.9;
     if (d >= rr || d < 1e-5) continue;
     p.pos.x += dx / d * (rr - d); p.pos.z += dz / d * (rr - d);
-    if (t.h > 14) { climbNormal = { x: dx / d, z: dz / d }; climbSolid = t; } // big trunks climbable
+    if (tTop > 14) { climbNormal = { x: dx / d, z: dz / d }; climbSolid = t; } // big trunks climbable
   }
 
   // --- climbing ---
@@ -295,8 +315,8 @@ function stepPlayer(dt) {
     if (facing > 0.25) {
       p.climbing = true;
       p.vel.y = p.pitch < -0.4 ? -CLIMB_SPEED : CLIMB_SPEED;
-      // mantle over the top edge
-      const topY = climbSolid.h !== undefined ? climbSolid.h : 0;
+      // mantle over the top edge (absolute: base + relative height)
+      const topY = climbSolid.h !== undefined ? (climbSolid.y0 || 0) + climbSolid.h : 0;
       if (topY && feet() > topY - 1.1 && p.pitch >= -0.4) {
         p.vel.y = 4.2;
         p.vel.x -= climbNormal.x * 2.4; p.vel.z -= climbNormal.z * 2.4;
@@ -310,20 +330,27 @@ function stepPlayer(dt) {
   }
 
   // --- vertical support ---
-  // Sinkhole: inside a pit radius the ground drops to the pit floor (below y=0), so the
-  // base support and the hard floor clamp both follow the pit depth instead of 0.
-  let groundY = 0; p.inPit = false;
+  // Terrain: the base of the world is terrainY under the feet, not the old constant 0.
+  // Sinkhole: inside a pit radius the ground drops to the pit floor, so the base support and
+  // the hard floor clamp both follow the pit depth instead. Pits only ever exist in chunks
+  // the flatness mask forces perfectly flat (terrainY === 0 there), so -pit.depth is still
+  // the right absolute floor; it is written relative to the local ground anyway so the two
+  // agree even if a pit ever lands on relief.
+  let groundY = terrainY(p.pos.x, p.pos.z); p.inPit = false;
   for (const pit of nearby.pits) {
     let inside;
     if (pit.rect) inside = p.pos.x > pit.x0 && p.pos.x < pit.x1 && p.pos.z > pit.z0 && p.pos.z < pit.z1;   // canal channel
     else { const dx = p.pos.x - pit.x, dz = p.pos.z - pit.z; inside = dx * dx + dz * dz < pit.r * pit.r; } // sinkhole bowl
-    if (inside) { groundY = Math.min(groundY, -pit.depth); p.inPit = true; }
+    // rect pits (canal channels) carry no centre point — sample under the player instead
+    const pitBase = pit.rect ? terrainY(p.pos.x, p.pos.z) : terrainY(pit.x, pit.z);
+    if (inside) { groundY = Math.min(groundY, pitBase - pit.depth); p.inPit = true; }
   }
   let support = groundY; p.onCanopy = false;
   let supportIsCanopy = false, supportLayer = null;
   for (const s of nearby.solids) {
     if (p.pos.x < s.x0 - 0.2 || p.pos.x > s.x1 + 0.2 || p.pos.z < s.z0 - 0.2 || p.pos.z > s.z1 + 0.2) continue;
-    if (feet() >= s.h - 1.0 && feet() <= s.h + 0.6 && s.h > support) { support = s.h; supportIsCanopy = false; supportLayer = null; }
+    const top = (s.y0 || 0) + s.h;
+    if (feet() >= top - 1.0 && feet() <= top + 0.6 && top > support) { support = top; supportIsCanopy = false; supportLayer = null; }
   }
   for (const pad of nearby.pads) {
     const dx = p.pos.x - pad.x, dz = p.pos.z - pad.z;
@@ -467,7 +494,7 @@ function blackout(line) {
   if (trial) failTrial('fell', 'You fell. The trial is lost.');
   else if (activeMission) failMission('You fell hard, and the errand with it.');
   setTimeout(() => {
-    p.pos.copy(lastShade); p.vel.set(0, 0, 0);
+    groundTeleport(p.pos.copy(lastShade)); p.vel.set(0, 0, 0);
     p.heat = clamp(p.heat + 25, 0, 100);
     p.airPeakY = p.pos.y; p.grounded = true; p.shake = 0; p.stagger = 0;
     if (line) msg(line + ' You wake in the shade, aching.', 6);
@@ -486,12 +513,16 @@ function blackout(line) {
    direct sun reaches the body through shafts between trees at street level, while
    real overhead cover shades you even above CANOPY_Y. Returns exposure E in [0,1]:
    0 = full shade, 1 = raw sun. No allocations — all scalar math. */
-function _rayHitsBox(px, py, pz, dx, dy, dz, x0, z0, x1, z1, h) {
+// Terrain: the vertical span is [y0, y0 + h], not the old [0, h]. `y0` is a trailing optional
+// argument defaulting to 0 so weather.js's shelter probe — which calls this with the old
+// 11-argument signature — keeps compiling and keeps its exact previous behaviour.
+function _rayHitsBox(px, py, pz, dx, dy, dz, x0, z0, x1, z1, h, y0) {
   let tmin = 0, tmax = 1e9;
+  const yb = y0 || 0, yt = yb + h;
   if (Math.abs(dx) < 1e-9) { if (px < x0 || px > x1) return false; }
   else { let t1 = (x0 - px) / dx, t2 = (x1 - px) / dx; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
-  if (Math.abs(dy) < 1e-9) { if (py < 0 || py > h) return false; }
-  else { let t1 = (0 - py) / dy, t2 = (h - py) / dy; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
+  if (Math.abs(dy) < 1e-9) { if (py < yb || py > yt) return false; }
+  else { let t1 = (yb - py) / dy, t2 = (yt - py) / dy; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
   if (Math.abs(dz) < 1e-9) { if (pz < z0 || pz > z1) return false; }
   else { let t1 = (z0 - pz) / dz, t2 = (z1 - pz) / dz; if (t1 > t2) { const s = t1; t1 = t2; t2 = s; } tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); }
   return tmax >= tmin && tmax > 0;
@@ -503,7 +534,7 @@ function sunOcclusion(px, py, pz, sd) {
   const solids = nearby.solids;
   for (let i = 0; i < solids.length; i++) {                  // walls / roofs / decks: opaque → full shade
     const s = solids[i];
-    if (_rayHitsBox(px, py, pz, dx, dy, dz, s.x0, s.z0, s.x1, s.z1, s.h)) return 0;
+    if (_rayHitsBox(px, py, pz, dx, dy, dz, s.x0, s.z0, s.x1, s.z1, s.h, s.y0 || 0)) return 0;
   }
   const pads = nearby.pads;                                  // leaf discs: canopies, weave, limbs, nets
   for (let i = 0; i < pads.length; i++) {
@@ -522,7 +553,8 @@ function sunOcclusion(px, py, pz, sd) {
       const tr = trunks[i];
       const tc = ((tr.x - px) * dx + (tr.z - pz) * dz) / denom;
       if (tc <= 0) continue;
-      const yh = py + dy * tc; if (yh < 0 || yh > tr.h) continue;
+      const tb = tr.y0 || 0;
+      const yh = py + dy * tc; if (yh < tb || yh > tb + tr.h) continue;
       const ddx = px + dx * tc - tr.x, ddz = pz + dz * tc - tr.z;
       if (ddx * ddx + ddz * ddz > tr.r * tr.r) continue;
       T *= 1 - 0.9;
@@ -583,7 +615,7 @@ function stepHeat(dt) {
     // heatstroke: stagger back to the last shade
     fadeEl.style.opacity = 1;
     setTimeout(() => {
-      p.pos.copy(lastShade); p.vel.set(0, 0, 0); p.heat = 55;
+      groundTeleport(p.pos.copy(lastShade)); p.vel.set(0, 0, 0); p.heat = 55;
       msg('The sun took you. You wake in the shade, head pounding.', 6);
       fadeEl.style.opacity = 0;
     }, 850);

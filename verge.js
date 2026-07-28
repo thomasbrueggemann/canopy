@@ -472,7 +472,7 @@ function vergeSyncEdgewright(dt) {
   if (near && !vgEdgewrightObj) {
     const ex = G.x + 3.2, ez = G.z + 1.5;
     const made = (typeof makeNPCGroup === 'function') ? makeNPCGroup(false, 'archivist') : null;
-    if (made) { made.g.position.set(ex, 0, ez); made.g.rotation.y = Math.atan2(player.pos.x - ex, player.pos.z - ez); scene.add(made.g); vgEdgewrightObj = made; vergeGate = made; }
+    if (made) { made.g.position.set(ex, terrainY(ex, ez), ez); made.g.rotation.y = Math.atan2(player.pos.x - ex, player.pos.z - ez); scene.add(made.g); vgEdgewrightObj = made; vergeGate = made; }
   } else if (!near && vgEdgewrightObj) { scene.remove(vgEdgewrightObj.g); vgEdgewrightObj = null; vergeGate = null; }
   if (vgEdgewrightObj) {
     const d = dist2(vgEdgewrightObj.g.position.x, vgEdgewrightObj.g.position.z, player.pos.x, player.pos.z);
@@ -1347,9 +1347,9 @@ function vergeGatePos() { return (verge.loc && verge.loc.gate) ? verge.loc.gate 
     // grant all five pieces held so the gate is assemblable
     for (const s of VERGE_SITES) { const k = SITE_PIECE[s]; if (VERGE_SAVE.pieces.held.indexOf(k) < 0 && VERGE_SAVE.pieces.seated.indexOf(k) < 0) { VERGE_SAVE.pieces.held.push(k); VERGE_SAVE.sitesSolved[s] = true; if (typeof invAdd === 'function' && !invHas(PIECE_ITEM[k])) invAdd(PIECE_ITEM[k], 1, vgPieceNote(k)); } }
     vergeSave();
-    player.pos.set(L.gate.x, 0, L.gate.z + 9); player.yaw = 0;   // face -z, toward the Gate
+    player.pos.set(L.gate.x, terrainY(L.gate.x, L.gate.z + 9), L.gate.z + 9); player.yaw = 0;   // face -z, toward the Gate
   } else if (L[q]) {
-    player.pos.set(L[q].x, (L[q].y || 0), L[q].z + 12); player.yaw = 0;   // face -z, toward the site
+    player.pos.set(L[q].x, Math.max(L[q].y || 0, terrainY(L[q].x, L[q].z + 12)), L[q].z + 12); player.yaw = 0;   // face -z, toward the site
     if (q === 'kiln' && typeof dayT !== 'undefined') dayT = 0.80;         // dusk, so the night kiln is workable to inspect
   }
   if (typeof ensureChunks === 'function') ensureChunks(player.pos.x, player.pos.z, true);

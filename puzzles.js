@@ -372,7 +372,7 @@ function ciphSyncTinker(dt) {
   const near = Math.abs(cx - tcx) <= 1 && Math.abs(cz - tcz) <= 1;
   if (near && !ciphTinkerObj) {
     const { g, anim } = makeNPCGroup(false, 'tinker');
-    g.position.set(T.x, 0, T.z);
+    g.position.set(T.x, terrainY(T.x, T.z), T.z);
     g.rotation.y = Math.atan2(player.pos.x - T.x, player.pos.z - T.z);
     scene.add(g); ciphTinkerObj = { g, anim }; ciphTinker = ciphTinkerObj;
   } else if (!near && ciphTinkerObj) { scene.remove(ciphTinkerObj.g); ciphTinkerObj = null; ciphTinker = null; }
@@ -807,15 +807,15 @@ function puzzleInteract() {
   const L = ciph.loc;
   if (q === 'vault') {
     for (let i = 1; i <= 5; i++) if (!invHas('cog' + i)) invAdd('cog' + i, 1, ciphCogNote('c' + i));
-    player.pos.set(L.vault.x, 0, L.vault.z + 8); player.yaw = Math.PI;
+    player.pos.set(L.vault.x, terrainY(L.vault.x, L.vault.z + 8), L.vault.z + 8); player.yaw = Math.PI;
   } else if (/^[1-5]$/.test(q)) {
     const k = 'c' + q;
     if (k === 'c3') {
       dayT = 0.7083;                                            // 17:00 — the shadow-clock window
       if (typeof updateSky === 'function') updateSky(dayT);     // refresh sunDir for the tip below
       const tx = SPIRE.x - sunDir.x / sunDir.y * SPIRE.h, tz = SPIRE.z - sunDir.z / sunDir.y * SPIRE.h;
-      player.pos.set(tx, 0, tz); player.yaw = Math.atan2(SPIRE.x - tx, SPIRE.z - tz);
-    } else if (L[k]) { player.pos.set(L[k].x, (L[k].y || 0), L[k].z + 20); player.yaw = Math.PI; }
+      player.pos.set(tx, terrainY(tx, tz), tz); player.yaw = Math.atan2(SPIRE.x - tx, SPIRE.z - tz);
+    } else if (L[k]) { player.pos.set(L[k].x, Math.max(L[k].y || 0, terrainY(L[k].x, L[k].z + 20)), L[k].z + 20); player.yaw = Math.PI; }
     if (k === 'c2' && !invHas('bellcard')) invAdd('bellcard', 1, 'The five bells, low to high: ' + CIPH_BELLNAMES.map((n, i) => n + ' (' + CIPH_BELLDESC[i] + ')').join(' · ') + '.');
   }
   if (typeof ensureChunks === 'function') ensureChunks(player.pos.x, player.pos.z, true);

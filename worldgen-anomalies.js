@@ -182,8 +182,11 @@ function addReservoir(B, colData, mini, rng, ox, oz, extra) {
 function uvToXZ(axis, cross, u) { return axis === 0 ? [cross, u] : [u, cross]; }
 function addPier(B, colData, rng, axis, cross, u, y) {
   const [px, pz] = uvToXZ(axis, cross, u);
-  B.plain.addGeo(tplBox, compose(px, 0, pz, 1.6, y - 0.3, 1.6), srgb(0x6f6f68), 0.06, rng);
-  colData.trunks.push({ x: px, z: pz, r: 0.9, h: y - 0.3 });   // side-block only (h<14 → not climbable, r<1.2 → not a giant)
+  // Terrain: the deck stays at its design height, so the pier grows DOWNWARD to meet the
+  // ground (0.4 m buried) instead of lifting — the pier/deck junction never opens a gap.
+  const pty = terrainY(px, pz) - 0.4;
+  B.plain.addGeo(tplBox, compose(px, pty, pz, 1.6, y - 0.3 - pty, 1.6), srgb(0x6f6f68), 0.06, rng);
+  colData.trunks.push({ x: px, z: pz, r: 0.9, y0: pty, h: y - 0.3 - pty });   // side-block only (h<14 → not climbable, r<1.2 → not a giant)
   // ivy climbing the concrete piers (visual only)
   const nv = 2 + (rng() * 3 | 0);
   for (let k = 0; k < nv; k++) {
@@ -312,7 +315,7 @@ function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
     if (!exists) {                                       // fallen span: debris on the street below
       for (let k = 0; k < 4; k++) {
         const rr = 1 + rng() * 1.4, [dx, dz] = uvToXZ(axis, cross + (rng() - 0.5) * 4, u0 + 2 + rng() * (spanLen - 4));
-        B.plain.addGeo(tplRock, compose(dx, rr * 0.2, dz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+        B.plain.addGeo(tplRock, compose(dx, terrainY(dx, dz) + rr * 0.2, dz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
       }
       continue;
     }
@@ -363,9 +366,10 @@ function buildViaductAxis(B, colData, mini, rng, ix, iz, ox, oz, axis) {
   if (hash2(lineIdx, axis === 0 ? iz : ix, 6004) % 3 === 0) {
     const sgn = (hash2(lineIdx, 7, 6004) % 2) ? 1 : -1, u = base0 + 24;
     const [tx, tz] = uvToXZ(axis, cross + sgn * hw, u), [bx, bz] = uvToXZ(axis, cross + sgn * (hw + 7), u);
-    rampPads(colData, bx, 0.1, bz, tx, y, tz, 2.0, 'viaduct');
-    const dxx = tx - bx, dzz = tz - bz, horiz = Math.hypot(dxx, dzz);
-    B.plain.addGeo(tplBoxC, composeSlab((bx + tx) / 2, y / 2, (bz + tz) / 2, 4, 0.5, Math.hypot(horiz, y), Math.atan2(y, horiz), Math.atan2(dxx, dzz)), srgb(0x7f7f77), 0.06, rng);
+    const rty = terrainY(bx, bz);
+    rampPads(colData, bx, rty + 0.1, bz, tx, y, tz, 2.0, 'viaduct');
+    const dxx = tx - bx, dzz = tz - bz, horiz = Math.hypot(dxx, dzz), rise = y - rty;
+    B.plain.addGeo(tplBoxC, composeSlab((bx + tx) / 2, (rty + y) / 2, (bz + tz) / 2, 4, 0.5, Math.hypot(horiz, rise), Math.atan2(rise, horiz), Math.atan2(dxx, dzz)), srgb(0x7f7f77), 0.06, rng);
   }
 }
 function addViaduct(B, colData, mini, rng, ix, iz, ox, oz) {
@@ -565,6 +569,7 @@ function addCanal(B, colData, rng, ix, iz, ox, oz, extra) {
 // pale glass shards (lamp batch, faint night glint), dense glow plants + ferns inside,
 // a rusted table. Visual only.
 function addGreenhouse(B, colData, rng, cx, cz) {
+  const gty = terrainY(cx, cz);   // Terrain: one sample carries the whole skeleton
   const L = 7 + rng() * 3, W = 4.5 + rng() * 2, archH = 3.2 + rng() * 1.2;
   const nRibs = 4 + (rng() * 3 | 0);
   const rust = _c.copy(COL.rust).multiplyScalar(0.8 + rng() * 0.4).clone();
@@ -577,20 +582,20 @@ function addGreenhouse(B, colData, rng, cx, cz) {
     let prev = null;
     for (let k = 0; k <= segs; k++) {
       const t = k / segs, ang = t * Math.PI;
-      const p = [rx, Math.sin(ang) * archH, cz + Math.cos(ang) * W / 2];
+      const p = [rx, gty + Math.sin(ang) * archH, cz + Math.cos(ang) * W / 2];
       if (prev) B.plain.addGeo(tplCyl, segMat(prev[0], prev[1], prev[2], p[0], p[1], p[2], 0.07), rust, 0.12, rng);
       prev = p;
     }
   }
   // a couple of ridge purlins tying ribs together at the top
-  B.plain.addGeo(tplCyl, segMat(ribX[0], archH, cz, ribX[ribX.length - 1], archH, cz, 0.06), rust, 0.1, rng);
+  B.plain.addGeo(tplCyl, segMat(ribX[0], gty + archH, cz, ribX[ribX.length - 1], gty + archH, cz, 0.06), rust, 0.1, rng);
   // surviving glass shards: quads spanning between adjacent ribs up near the crown
   for (let r = 0; r < nRibs - 1; r++) {
     if (rng() < 0.55) continue;
     const x0 = ribX[r], x1 = ribX[r + 1];
     const t = 0.2 + rng() * 0.5, ang = t * Math.PI;
-    const zc = cz + Math.cos(ang) * W / 2, yc = Math.sin(ang) * archH;
-    const zc2 = cz + Math.cos((t + 0.18) * Math.PI) * W / 2, yc2 = Math.sin((t + 0.18) * Math.PI) * archH;
+    const zc = cz + Math.cos(ang) * W / 2, yc = gty + Math.sin(ang) * archH;
+    const zc2 = cz + Math.cos((t + 0.18) * Math.PI) * W / 2, yc2 = gty + Math.sin((t + 0.18) * Math.PI) * archH;
     B.lamp.quad([x0, yc, zc], [x1, yc, zc], [x1, yc2, zc2], [x0, yc2, zc2], [0, 0, 1, 1], glass);
   }
   // dense glow plants + ferns inside, a rusted table
@@ -600,32 +605,34 @@ function addGreenhouse(B, colData, rng, cx, cz) {
     addFern(B, rng, cx + (rng() - 0.5) * L * 0.8, cz + (rng() - 0.5) * W * 0.7, rng() * 7, 1.0 + rng() * 0.8);
   if (rng() < 0.7) {
     const tx = cx + (rng() - 0.5) * L * 0.5, tz = cz + (rng() - 0.5) * W * 0.4;
-    B.plain.addGeo(tplBox, compose(tx, 0.7, tz, 1.8, 0.1, 0.8, 0, rng() * 7, 0), COL.rust, 0.12, rng);
-    for (const lx of [-0.7, 0.7]) B.plain.addGeo(tplCyl, compose(tx + lx, 0, tz, 0.05, 0.7, 0.05), COL.rust, 0, rng);
+    B.plain.addGeo(tplBox, compose(tx, gty + 0.7, tz, 1.8, 0.1, 0.8, 0, rng() * 7, 0), COL.rust, 0.12, rng);
+    for (const lx of [-0.7, 0.7]) B.plain.addGeo(tplCyl, compose(tx + lx, gty, tz, 0.05, 0.7, 0.05), COL.rust, 0, rng);
   }
 }
 
 // A single arched fern frond: a scaled-up grass quad leaning outward. Visual only.
 function addFern(B, rng, x, z, ang, s) {
+  const fy = terrainY(x, z);                                // Terrain: the frond roots on the ground
   const tx = -Math.sin(ang), tz = Math.cos(ang);            // tangential (blade width)
   const ox2 = Math.cos(ang), oz2 = Math.sin(ang);           // radial outward (lean)
   const w = 0.5 + rng() * 0.5, lean = s * (0.4 + rng() * 0.4);
   const tipx = x + ox2 * lean, tipz = z + oz2 * lean;
   const col = rng() < 0.5 ? COL.grassA : COL.leafC, dark = _c.copy(col).multiplyScalar(0.5).clone();
   B.grass.quad(
-    [x - tx * w / 2, 0, z - tz * w / 2], [x + tx * w / 2, 0, z + tz * w / 2],
-    [tipx + tx * w / 2, s, tipz + tz * w / 2], [tipx - tx * w / 2, s, tipz - tz * w / 2],
+    [x - tx * w / 2, fy, z - tz * w / 2], [x + tx * w / 2, fy, z + tz * w / 2],
+    [tipx + tx * w / 2, fy + s, tipz + tz * w / 2], [tipx - tx * w / 2, fy + s, tipz - tz * w / 2],
     [0, 0, 1, 1], col, dark);
 }
 
 // Wind-chime pole: a slim pole + cross arm, 5–8 hanging strings each with a small bottle/
 // shell. Registers a chime point so the audio loop can tinkle when the player is near.
 function addWindChime(B, colData, rng, x, z) {
-  const ph = 3.6 + rng() * 0.8;
-  B.plain.addGeo(tplCyl, compose(x, 0, z, 0.07, ph, 0.07), COL.wood, 0.1, rng);
+  const cty = terrainY(x, z);   // Terrain: pole foot, arm and every hanging bottle share one sample
+  const ph = cty + 3.6 + rng() * 0.8;
+  B.plain.addGeo(tplCyl, compose(x, cty - 0.2, z, 0.07, ph - cty + 0.2, 0.07), COL.wood, 0.1, rng);
   const armAng = rng() * Math.PI, ax = Math.cos(armAng), az = Math.sin(armAng), arm = 1.1;
   B.plain.addGeo(tplBox, compose(x, ph, z, arm * 2, 0.06, 0.06, 0, -armAng, 0), COL.wood, 0.1, rng);
-  colData.trunks.push({ x, z, r: 0.1, h: ph });
+  colData.trunks.push({ x, z, r: 0.1, y0: cty, h: ph - cty });
   const n = 5 + (rng() * 4 | 0);
   for (let k = 0; k < n; k++) {
     const t = (k / (n - 1) - 0.5) * 2;
@@ -648,7 +655,7 @@ function addShrine(B, colData, rng, s) {
   const cn = corners[(rng() * 4) | 0];
   const cx = (s.x0 + s.x1) / 2, cz = (s.z0 + s.z1) / 2;
   const ox2 = cn[0] < cx ? -1 : 1, oz2 = cn[1] < cz ? -1 : 1;
-  const sx = cn[0] + ox2 * 0.5, sz = cn[1] + oz2 * 0.5, sy = 1.1 + rng() * 0.5;
+  const sx = cn[0] + ox2 * 0.5, sz = cn[1] + oz2 * 0.5, sy = (s.y0 || 0) + 1.1 + rng() * 0.5;
   const stone = _c.copy(COL.rock).lerp(COL.moss, 0.2).clone();
   B.plain.addGeo(tplBox, compose(sx, sy, sz, 1.1, 0.5, 0.9, 0, rng() * 0.4, 0), stone, 0.1, rng);   // shelf box
   const nC = 2 + (rng() * 2 | 0);
@@ -938,10 +945,12 @@ function addLittleDetails(B, colData, mini, rng, ix, iz, ox, oz, type, style) {
       else if (face === 1) { ax = s.x0; az = lerp(s.z0, s.z1, u); pxp = ax - dist; pzp = az; }
       else if (face === 2) { az = s.z1; ax = lerp(s.x0, s.x1, u); pzp = az + dist; pxp = ax; }
       else { az = s.z0; ax = lerp(s.x0, s.x1, u); pzp = az - dist; pxp = ax; }
-      if (Math.min(ly, ly) > s.h - 0.3) continue;          // cord must stay below the roof
+      if (Math.min(ly, ly) > s.h - 0.3) continue;          // cord must stay below the roof (RELATIVE — rng-stable)
       if (pxp < ox + 2 || pxp > ox + CHUNK - 2 || pzp < oz + 2 || pzp > oz + CHUNK - 2) continue;
-      B.plain.addGeo(tplCyl, compose(pxp, 0, pzp, 0.05, ly + 0.3, 0.05), COL.wood, 0, rng);
-      addLaundryLine(B, rng, ax, ly, az, pxp, ly, pzp);
+      // Terrain: the cord hangs off the building at ITS base + ly; the pole grows out of its own ground.
+      const cy = (s.y0 || 0) + ly, pty = terrainY(pxp, pzp);
+      B.plain.addGeo(tplCyl, compose(pxp, pty, pzp, 0.05, cy - pty + 0.3, 0.05), COL.wood, 0, rng);
+      addLaundryLine(B, rng, ax, cy, az, pxp, cy, pzp);
     }
   }
 
@@ -964,7 +973,7 @@ function addLittleDetails(B, colData, mini, rng, ix, iz, ox, oz, type, style) {
         addMushroomCluster(B, rng, pit.x + Math.cos(a) * d, pit.z + Math.sin(a) * d, -pit.depth + 0.02);
       } else if (mini.trees.length) {
         const t = mini.trees[(rng() * mini.trees.length) | 0], a = rng() * Math.PI * 2, d = 1 + rng() * 2;
-        addMushroomCluster(B, rng, t[0] + Math.cos(a) * d, t[1] + Math.sin(a) * d, 0);
+        addMushroomCluster(B, rng, t[0] + Math.cos(a) * d, t[1] + Math.sin(a) * d);
       }
     }
   }
@@ -978,7 +987,7 @@ function addLittleDetails(B, colData, mini, rng, ix, iz, ox, oz, type, style) {
       const s = cands[(rng() * cands.length) | 0];
       const atX0 = rng() < 0.5, atZ0 = rng() < 0.5;
       const cx = atX0 ? s.x0 : s.x1, cz = atZ0 ? s.z0 : s.z1;
-      const cy = Math.min(s.h - 0.3, 2 + rng() * 2.4);
+      const cy = (s.y0 || 0) + Math.min(s.h - 0.3, 2 + rng() * 2.4);
       const sx = atX0 ? 1 : -1, sz = atZ0 ? 1 : -1;
       addCobweb(B, rng, cx, cy, cz, 0.5 + rng() * 0.5, [sx, -0.35, 0], [0, -0.35, sz]);
     }
@@ -995,7 +1004,11 @@ function buildChunk(ix, iz) {
   const biome = REG.biome;
   const vd = clamp((REG.verdancy - 0.51) / 0.21, -1, 1);   // −1..1 across the canopy band (micro-drift)
   const ox = ix * CHUNK, oz = iz * CHUNK;
-  const B = { plain: new Batch(), bark: new Batch(2.2), bld: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch() };
+  // bld/bldB/bldR/bldT: one batch per FACADE material (concrete / brick / render / glazed
+  // tile). A chunk normally fills exactly one of them — districts are 3x3 chunks and every
+  // building in a chunk takes its material from the district — so the empty ones mesh to
+  // null and cost nothing. Keep these names in step with core.js's FACADES registry.
+  const B = { plain: new Batch(), bark: new Batch(2.2), bld: new Batch(), bldB: new Batch(), bldR: new Batch(), bldT: new Batch(), leaf: new Batch(), vine: new Batch(), grass: new Batch(), glow: new Batch(), lamp: new Batch(), puddle: new Batch(), web: new Batch(), net: new Batch(), surf: new Batch() };
   const colData = { solids: [], trunks: [], pads: [], lamps: [], pits: [], waters: [], chimes: [], ferns: [], ladders: [], lifts: [],
     // Ambient-vignette anchors (Life pass): discovered at build time, driven at runtime by
     // pooled overlays in entities.js. All optional, all cheap; queried O(near) per frame.
@@ -1135,7 +1148,7 @@ function buildChunk(ix, iz) {
           else if (side === 2) { vx = ox + INSET + 6; vz = oz + center; }
           else { vx = ox + CHUNK - INSET - 6; vz = oz + center; }
           const rr = 1 + rng() * 1.6;
-          B.plain.addGeo(tplRock, compose(vx, rr * 0.2, vz, rr, rr * 0.45, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+          B.plain.addGeo(tplRock, compose(vx, terrainY(vx, vz) + rr * 0.2, vz, rr, rr * 0.45, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
           addTree(B, colData, mini, rng, vx + (rng() - 0.5) * 4, vz + (rng() - 0.5) * 4, 9 + rng() * 6, 4 + rng() * 2);
           for (let g = 0; g < 7; g++) addGrassTuft(B, rng, vx + (rng() - 0.5) * 8, vz + (rng() - 0.5) * 8, 0.5 + rng() * 0.6);
         }
@@ -1170,18 +1183,19 @@ function buildChunk(ix, iz) {
     for (let k = 0; k < 4 + rng() * 3; k++) {
       const rr = 1.2 + rng() * 2.4;
       const rx = ox + lerp(b0 + 4, b1 - 4, rng()), rz = oz + lerp(b0 + 4, b1 - 4, rng());
-      B.plain.addGeo(tplRock, compose(rx, rr * 0.25, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
-      colData.trunks.push({ x: rx, z: rz, r: rr * 0.7, h: rr * 0.7 });
+      const rty = terrainY(rx, rz);
+      B.plain.addGeo(tplRock, compose(rx, rty + rr * 0.25, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+      colData.trunks.push({ x: rx, z: rz, r: rr * 0.7, y0: rty, h: rr * 0.7 });
     }
     // dead trees
     for (let k = 0; k < 2; k++)
       addTree(B, colData, mini, rng, ox + lerp(b0, b1, rng()), oz + lerp(b0, b1, rng()), 10 + rng() * 8, 4, { dead: true });
     // dry fountain
     if (rng() < 0.6) {
-      const fx = ox + 32, fz = oz + 32;
-      B.plain.addGeo(new THREE.CylinderGeometry(4.2, 4.6, 1, 14), compose(fx, 0.5, fz, 1, 1, 1), COL.rock, 0.1, rng);
-      B.plain.addGeo(new THREE.CylinderGeometry(0.6, 0.9, 2.6, 8), compose(fx, 1.3, fz, 1, 1, 1), COL.rock, 0.1, rng);
-      colData.trunks.push({ x: fx, z: fz, r: 4.4, h: 1 });
+      const fx = ox + 32, fz = oz + 32, fty = terrainY(fx, fz);
+      B.plain.addGeo(new THREE.CylinderGeometry(4.2, 4.6, 1, 14), compose(fx, fty + 0.5, fz, 1, 1, 1), COL.rock, 0.1, rng);
+      B.plain.addGeo(new THREE.CylinderGeometry(0.6, 0.9, 2.6, 8), compose(fx, fty + 1.3, fz, 1, 1, 1), COL.rock, 0.1, rng);
+      colData.trunks.push({ x: fx, z: fz, r: 4.4, y0: fty, h: 1 });
     }
     // street market around the old square
     const nStall = 2 + (rng() * 3 | 0);
@@ -1305,7 +1319,7 @@ function buildChunk(ix, iz) {
       const onX = rng() < 0.5, rr = 0.7 + rng() * 1.4;
       const rx = onX ? ox + rng() * CHUNK : ox + (rng() < 0.5 ? 6 : CHUNK - 6);
       const rz = onX ? oz + (rng() < 0.5 ? 6 : CHUNK - 6) : oz + rng() * CHUNK;
-      B.plain.addGeo(tplRock, compose(rx, rr * 0.2, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
+      B.plain.addGeo(tplRock, compose(rx, terrainY(rx, rz) + rr * 0.2, rz, rr, rr * 0.5, rr, rng(), rng() * 7, rng()), COL.rock, 0.2, rng);
     }
   }
 
@@ -1375,6 +1389,9 @@ function buildChunk(ix, iz) {
     B.plain.mesh(matPlain, true, true),
     B.bark.mesh(matBark, true, true),
     B.bld.mesh(matBld, true, true),
+    B.bldB.mesh(matBldBrick, true, true),        // oldtown / garden: fired brick
+    B.bldR.mesh(matBldRender, true, true),       // works: painted render over blockwork
+    B.bldT.mesh(matBldTile, true, true),         // glass: glazed ceramic tile + curtain wall
     B.leaf.mesh(matLeaf, true, true, leafDepth),
     B.vine.mesh(matVine, false, true),
     B.grass.mesh(matGrass, false, true),
@@ -1382,7 +1399,8 @@ function buildChunk(ix, iz) {
     B.lamp.mesh(matLamp, false, true),
     B.puddle.mesh(matPuddle, false, true),
     B.web.mesh(matWeb, false, false),
-    B.net.mesh(matNet, false, true)               // sky nets (Feature B)
+    B.net.mesh(matNet, false, true),              // sky nets (Feature B)
+    B.surf.mesh(matSurf, false, true)             // street surface: asphalt / sidewalk / kerbs
   ];
   for (const m of meshes) if (m) group.add(m);
   for (const m of extraMeshes) group.add(m);

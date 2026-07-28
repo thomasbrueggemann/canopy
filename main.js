@@ -299,7 +299,7 @@ function updateMissions(dt, time) {
       // Deliveries: spawn her with the chat/vendor arm rig so she can reach out & take the parcel on
       // delivery — keep the whole {g, anim} pair (departReceiver needs the arm).
       m.receiver = makeNPCGroup(false, 'chat');
-      m.receiver.g.position.set(m.target.x, 0, m.target.z); scene.add(m.receiver.g);
+      m.receiver.g.position.set(m.target.x, terrainY(m.target.x, m.target.z), m.target.z); scene.add(m.receiver.g);
     }
     if (m.receiver) m.receiver.g.rotation.y = Math.atan2(p.pos.x - m.target.x, p.pos.z - m.target.z);
     if (d < 4 && m.receiver) {
@@ -367,7 +367,7 @@ function syncTrialMasters() {
     want.add(key);
     if (!trialMasters.has(key)) {
       const { g, anim } = makeNPCGroup(false, 'trialmaster');
-      g.position.set(spec.x, 0, spec.z);
+      g.position.set(spec.x, terrainY(spec.x, spec.z), spec.z);
       scene.add(g);
       trialMasters.set(key, { g, anim, spec, faceYaw: 0 });
     }
@@ -405,7 +405,7 @@ function syncHamletResidents(dt) {
     hamletResidentsActive = true;
     for (const a of hamletResidentAnchors()) {
       const { g, anim } = makeNPCGroup(false, a.role);
-      g.position.set(a.x, a.y, a.z); g.rotation.y = a.face;
+      g.position.set(a.x, a.y + terrainY(a.x, a.z), a.z); g.rotation.y = a.face;
       scene.add(g); hamletResidents.push({ g, anim, base: a });
     }
   } else if (!near && hamletResidentsActive) {
@@ -770,7 +770,7 @@ function updateTrials(dt, time) {
         msg('The relic is cold and heavy. Your flashlight sputters — follow the glow-plants home.', 6);
       }
     } else {
-      setMark(0, T.home.x, 1.4, T.home.z, 0.8);
+      setMark(0, T.home.x, terrainY(T.home.x, T.home.z) + 1.4, T.home.z, 0.8);
       activeObjective = T.home;
       // carrying fouls the flashlight: dim, flickering, off-tint
       flashlight.color.setHex(0x6a8f7a);
@@ -786,14 +786,14 @@ function updateTrials(dt, time) {
         msg('Now fall. Let the leaves take you down.', 5);
       }
     } else {
-      setMark(0, T.ground.x, 1.4, T.ground.z, 0.9);
+      setMark(0, T.ground.x, terrainY(T.ground.x, T.ground.z) + 1.4, T.ground.z, 0.9);
       activeObjective = T.ground;
       if (dist2(p.pos.x, p.pos.z, T.ground.x, T.ground.z) < 5 && p.pos.y < 4 && p.grounded) completeTrial();
     }
   } else if (T.id === TRIAL.RUMOR) {
     if (T.phase === 'clue1' || T.phase === 'clue2') {
       // a marker only for the clue you've already been given (both are real world features)
-      if (T.wp) { setMark(0, T.wp.x, (T.wp.y || 0) + 1.4, T.wp.z, 0.9); activeObjective = T.wp; }
+      if (T.wp) { setMark(0, T.wp.x, Math.max(T.wp.y || 0, terrainY(T.wp.x, T.wp.z)) + 1.4, T.wp.z, 0.9); activeObjective = T.wp; }
       if (T.wp && dist2(p.pos.x, p.pos.z, T.wp.x, T.wp.z) < 12) {
         if (T.phase === 'clue1') {
           T.phase = 'clue2';
@@ -1234,7 +1234,7 @@ updateSky(dayT);
 if (SHOT) {
   hideOverlay();
   if (SHOT === '2') { player.pos.set(SPIRE.x - 9.5, SPIRE.h, SPIRE.z); player.yaw = Math.PI / 2; player.pitch = -0.3; dayT = 0.42; }
-  else if (SHOT === '3') { dayT = 0.93; player.pos.set(0, 0, 30); player.yaw = Math.PI; }
+  else if (SHOT === '3') { dayT = 0.93; player.pos.set(0, terrainY(0, 30), 30); player.yaw = Math.PI; }
   else if (SHOT === '4') {
     // The Hidden Hamlet — stand at the centre-facing rim of a platform, looking across the
     // clearing at the bridges and huts. Late-afternoon light so the whole village reads.
@@ -1246,30 +1246,35 @@ if (SHOT) {
   }
   else if (SHOT === '5') {
     // Life-pass vignette shot: a conversation pair with a smoke plume behind them.
-    dayT = 0.42; player.pos.set(0, 0, 30); player.yaw = Math.PI; player.pitch = 0.03;
+    dayT = 0.42; player.pos.set(0, terrainY(0, 30), 30); player.yaw = Math.PI; player.pitch = 0.03;
   }
   else {
     dayT = 0.42;
     const spawnAngle = Math.random() * Math.PI * 2;
     const spawnDist = 20 + Math.random() * 80;
-    player.pos.set(Math.cos(spawnAngle) * spawnDist, 0, 30 + Math.sin(spawnAngle) * spawnDist);
+    const _sx = Math.cos(spawnAngle) * spawnDist, _sz = 30 + Math.sin(spawnAngle) * spawnDist;
+    player.pos.set(_sx, terrainY(_sx, _sz), _sz);
     player.yaw = Math.PI; player.pitch = 0.04;
   }
   // Dev/screenshot spawn override: ?px=&pz= drop the camera at chosen world coords (SHOT only);
   // optional &py=&yaw=&pitch= for framing (defaults: ground, facing +z, near-level).
   const _spx = params.get('px'), _spz = params.get('pz');
   if (_spx !== null && _spz !== null) {
-    player.pos.set(+_spx, +(params.get('py') || 0), +_spz);
+    // Terrain: &py= is an offset ABOVE the ground so a framing URL keeps working on relief.
+    player.pos.set(+_spx, terrainY(+_spx, +_spz) + +(params.get('py') || 0), +_spz);
     player.yaw = params.get('yaw') !== null ? +params.get('yaw') : Math.PI;
     player.pitch = params.get('pitch') !== null ? +params.get('pitch') : 0.04;
   }
+  // &dayt= holds the shot at a chosen hour (0..1) — the only way to bench anything the sun
+  // shapes (the canopy roof, the terminator) at more than the one hour each shot presets.
+  if (params.get('dayt') !== null) dayT = +params.get('dayt');
   ensureChunks(player.pos.x, player.pos.z, true);
   if (SHOT === '4') syncHamletResidents(0.016);   // residents in frame for the hamlet shot
   if (SHOT !== '2' && SHOT !== '4' && SHOT !== '5') { // a few citizens in frame
     const spots = [[-6.1, 44, 0.3], [2.5, 52, 2.8], [6.3, 60, -0.4], [-1.5, 68, 1.6], [-6.4, 74, 2.2]];
     for (let k = 0; k < spots.length; k++) {
       const { g } = makeNPCGroup(k === 3, k === 2 ? 'sweep' : 'walk');
-      g.position.set(spots[k][0], 0, spots[k][1]);
+      g.position.set(spots[k][0], terrainY(spots[k][0], spots[k][1]), spots[k][1]);
       g.rotation.y = spots[k][2];
       scene.add(g);
     }
@@ -1277,12 +1282,12 @@ if (SHOT) {
   if (SHOT === '5') {
     // deterministic face-to-face conversation pair, arms up mid-gesture, ~0.8 m apart
     const A = makeNPCGroup(false, 'chat'), B = makeNPCGroup(false, 'chat');
-    A.g.position.set(-0.4, 0, 37); A.g.rotation.y = Math.atan2(0.8, 0.6); scene.add(A.g);
-    B.g.position.set(0.4, 0, 37.6); B.g.rotation.y = Math.atan2(-0.8, -0.6); scene.add(B.g);
+    A.g.position.set(-0.4, terrainY(-0.4, 37), 37); A.g.rotation.y = Math.atan2(0.8, 0.6); scene.add(A.g);
+    B.g.position.set(0.4, terrainY(0.4, 37.6), 37.6); B.g.rotation.y = Math.atan2(-0.8, -0.6); scene.add(B.g);
     if (A.anim) A.anim.rotation.x = -0.8;   // speaker's raised hand
     // a couple of onlookers + a smoke plume anchor behind the pair
     for (const s of [[-4.5, 46, 1.4, false], [4.2, 50, -1.2, true]]) {
-      const { g } = makeNPCGroup(s[3], 'walk'); g.position.set(s[0], 0, s[1]); g.rotation.y = s[2]; scene.add(g);
+      const { g } = makeNPCGroup(s[3], 'walk'); g.position.set(s[0], terrainY(s[0], s[1]), s[1]); g.rotation.y = s[2]; scene.add(g);
     }
     const c = chunkAt(6, 44); if (c) c.colData.smokes.push({ x: 6, y: 7, z: 44, r: 0.5, warm: false });
   }
@@ -1326,7 +1331,9 @@ function loop() {
   flashlight.intensity += ((flashOn ? 4.5 : 0) - flashlight.intensity) * Math.min(1, 9 * dt);
 
   skyGroup.position.set(camera.position.x, 0, camera.position.z);
-  ground.position.set(Math.round(player.pos.x / 8) * 8, 0, Math.round(player.pos.z / 8) * 8);
+  // Terrain: positionGround re-displaces + re-normals the tessellated floor sheet, but only
+  // when the 8 m snap actually moved (it early-outs otherwise).
+  positionGround(Math.round(player.pos.x / 8) * 8, Math.round(player.pos.z / 8) * 8);
 
   // above the leaves: the horizon opens up and the canopy sea appears. The sea ring sits
   // at y 26.5 — right inside the Weave (24–28) — so it only reveals once the player is
@@ -1336,6 +1343,11 @@ function loop() {
   sea.visible = seaReveal > 0.02;
   seaMat.opacity = seaReveal;
   sea.position.set(player.pos.x, 26.5, player.pos.z);
+  // The roof is displaced, UV'd and tinted in WORLD space but the mesh is parked on the player,
+  // so it has to be re-baked whenever the player crosses a 16 m snap — same contract as
+  // positionGround above, and for the same reason (otherwise the whole forest swims with you).
+  // Gated on visibility: the re-bake is ~2 ms and you are under the leaves almost all the time.
+  if (sea.visible) positionSea(Math.round(player.pos.x / 16) * 16, Math.round(player.pos.z / 16) * 16);
   // Weather thickens the fog (dust storm / rain) via WX multipliers; min-clamped so the
   // world never fully vanishes. Safe-defaulted to 1 when weather.js is absent.
   const _fogFarMul = (typeof WX !== 'undefined') ? WX.fogFarMul : 1;

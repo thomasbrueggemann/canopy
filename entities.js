@@ -83,34 +83,467 @@ function updateDrifters(time, px, py, pz) {
   flies.mesh.visible = nightF > 0.05;
 }
 
-/* ======================================================================== */
-/*  PEOPLE — cloaked citizens of the canopy                            */
-/* ======================================================================== */
-const npcGeoCloak = new THREE.CylinderGeometry(0.17, 0.37, 1.16, 7); npcGeoCloak.translate(0, 0.58, 0);
-const npcGeoHood = new THREE.SphereGeometry(0.23, 8, 6); npcGeoHood.scale(1, 0.78, 1);
-const npcGeoHead = new THREE.SphereGeometry(0.135, 8, 6);
+/* ========================================================================= */
+/*  PEOPLE — cloaked citizens of the canopy                                  */
+/*                                                                           */
+/*  A citizen used to be a 7-sided cone, a squashed sphere and a ball, all on */
+/*  untextured MeshStandardMaterials with no map of any kind — which is why   */
+/*  they read as faceted plastic cones in a hood. This is the cloth pass:     */
+/*   · ONE shared woven sheet (albedo + height→normalMap + roughnessMap),     */
+/*     drawn at TRUE WORLD SCALE: 1024 px covers CLOTH_U (0.628 m) of         */
+/*     circumference and 2048 px covers CLOTH_H (1.18 m) of cloak — ≈1630     */
+/*     px/m, 1 px ≈ 0.6 mm — so the 1.4 mm plain weave is a real 2-px         */
+/*     over/under crossing of warp and weft, not a decorative pattern.        */
+/*     u TILES ×4 round a cloak (four sewn panels, seam and all); v does NOT  */
+/*     tile, so the sheet's vertical axis IS the garment: sun-bleached at the */
+/*     collar, road dirt climbing the lower cloak, a stitched turned-up hem   */
+/*     and an abraded edge at the very bottom.                                */
+/*   · MeshPhysicalMaterial with sheen/sheenColor/sheenRoughness — r152's     */
+/*     actual cloth lobe. A diffuse-only cloak stays plastic no matter what   */
+/*     you paint on it; sheen is the retro-reflective halo that fibre ends    */
+/*     throw at grazing angles, and it is most of what says "this is cloth"   */
+/*     on a silhouette. Albedo stays LIGHT and neutral so the eight cloak     */
+/*     colours are still plain tints over it (the trick matBark uses).        */
+/*   · real drape in the GEOMETRY: 26 radial segments carrying seven fold     */
+/*     ridges that twist as they fall and fade out at the shoulders, a bell   */
+/*     hem with a closed underside, shoulders that broaden out of the cone,   */
+/*     and a carved cowl hood — rolled rim, dark inner lining, an overhang    */
+/*     that puts the face in a shadowed recess instead of on a bare ball.     */
+/*  Everything is SHARED across every citizen alive: five geometries, one     */
+/*  sheet, ten materials. Nothing is built per NPC.                           */
+/*  SAFE TO RESHAPE: these are standalone Meshes added to a Group (never      */
+/*  Batch.addGeo) that pick colours with Math.random(), not the worldgen rng  */
+/*  — so vertex counts here cannot re-roll the world the way template changes */
+/*  do (see the note above Batch.addGeo in core.js).                          */
+/* ========================================================================= */
+
+/* ------------------------------------------------------------ cloth sheet -- */
+const CLOTH_U = 0.628;   // metres of circumference one sheet tile covers (4 panels/cloak)
+const CLOTH_H = 1.18;    // metres of cloak the sheet's v axis covers (v=0 hem → v=1 collar)
+function makeClothTexture() {
+  const W = 1024, H = 2048, r = mulberry32(60217);
+  const PX = W / CLOTH_U, PY = H / CLOTH_H;    // ≈1631 / ≈1735 px per metre
+  const c = makeCanvas(W, H), x = c.getContext('2d');
+  const cH = makeCanvas(W, H), xh = cH.getContext('2d');   // height field → normal map
+  const WX = [-W, 0, W];
+
+  /* 1) THE WEAVE. A plain over/under weave is a checkerboard of crossings: at half of
+     them the warp (vertical yarn) floats over the weft, at the other half the weft
+     floats over the warp. Both yarns keep a rounded cross-section, so every crossing
+     is a little dome and every gap between two yarns is a pit — that pit lattice is
+     what a normal map needs to make cloth catch a raking light like cloth.
+     Written straight into ImageData: at 1.4 mm yarn this sheet is 448×843 crossings,
+     and stroking two million of them through the 2d context would cost seconds. */
+  const YARN = 0.0014;                                          // 1.4 mm — coarse homespun
+  const NU = 2 * Math.max(1, Math.round(W / (YARN * PX) / 2));   // even, so the checker wraps in u
+  const NV = Math.max(1, Math.round(H / (YARN * PY)));
+  const CU = W / NU, CV = H / NV;
+  const wTh = new Float32Array(NU), wTo = new Float32Array(NU);  // per-yarn thickness & dye tone
+  for (let i = 0; i < NU; i++) { wTh[i] = 0.72 + r() * 0.52; wTo[i] = 0.90 + r() * 0.2; }
+  const fTh = new Float32Array(NV), fTo = new Float32Array(NV);
+  for (let i = 0; i < NV; i++) { fTh[i] = 0.72 + r() * 0.52; fTo[i] = 0.90 + r() * 0.2; }
+  const img = x.createImageData(W, H), d = img.data;
+  const imh = xh.createImageData(W, H), dh = imh.data;
+  for (let py = 0; py < H; py++) {
+    const fv = py / CV, jv = fv | 0, cv = fv - jv;
+    const fth = fTh[jv], fto = fTo[jv];
+    let b = (cv - 0.5) / (0.5 * fth); if (b < -1) b = -1; else if (b > 1) b = 1;
+    const pv = 1 - b * b;
+    const row = py * W * 4;
+    for (let px = 0; px < W; px++) {
+      const fu = px / CU, ju = fu | 0, cu = fu - ju;
+      let a = (cu - 0.5) / (0.5 * wTh[ju]); if (a < -1) a = -1; else if (a > 1) a = 1;
+      const pu = 1 - a * a;
+      const over = ((ju + jv) & 1) === 0;
+      const hg = over ? pu * 0.88 + pv * 0.24 : pv * 0.88 + pu * 0.24;
+      const lit = 0.58 + 0.36 * (hg > 1 ? 1 : hg) + r() * 0.09 - 0.045;
+      let v = 234 * lit * (over ? wTo[ju] : fto);
+      if (v > 255) v = 255; else if (v < 0) v = 0;
+      const o = row + px * 4;
+      d[o] = v; d[o + 1] = v * 0.988; d[o + 2] = v * 0.968; d[o + 3] = 255;
+      let hv = 128 + (hg - 0.56) * 155;
+      if (hv > 255) hv = 255; else if (hv < 0) hv = 0;
+      dh[o] = dh[o + 1] = dh[o + 2] = hv; dh[o + 3] = 255;
+    }
+  }
+  x.putImageData(img, 0, 0); xh.putImageData(imh, 0, 0);
+
+  /* 2) uneven dye — hand-dyed cloth is never one flat colour, and this is the only
+        layer big enough to survive the mip chain at 15 m. */
+  for (let i = 0; i < 24; i++) {
+    const bx = r() * W, by = r() * H, br = (0.05 + r() * 0.24) * PY, dark = r() < 0.5, a = 0.05 + r() * 0.09;
+    for (const ox of WX) {
+      if (bx + ox < -br || bx + ox > W + br) continue;
+      const g = x.createRadialGradient(bx + ox, by, 1, bx + ox, by, br);
+      g.addColorStop(0, dark ? `rgba(120,110,94,${a})` : `rgba(255,252,244,${a})`);
+      g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(bx + ox, by, br, 0, 7); x.fill();
+    }
+  }
+
+  /* 3) DRAPE. A fold is a lit ridge with a dark valley pinched under it, so each crease
+        is drawn twice into the height field (a wide soft crest, then a narrow deep line)
+        and once faintly into albedo. Horizontal "memory" creases come from a cloak
+        being folded away; the long vertical wrinkles are the fabric hanging. The
+        horizontal ones ride integer harmonics of the width so they tile in u. */
+  const wave = (ctx, y0, cyc, amp, ph, lw, style, blur) => {
+    ctx.save(); if (blur) ctx.filter = `blur(${blur}px)`;
+    ctx.strokeStyle = style; ctx.lineWidth = Math.max(0.8, lw); ctx.lineCap = 'round';
+    ctx.beginPath();
+    for (let px = -8; px <= W + 8; px += 8) ctx.lineTo(px, y0 + Math.sin(px / W * cyc * 6.283185 + ph) * amp);
+    ctx.stroke(); ctx.restore();
+  };
+  for (let i = 0; i < 9; i++) {
+    const y0 = (0.05 + r() * 0.9) * H, cyc = 1 + (r() * 3 | 0);
+    const amp = (0.004 + r() * 0.018) * PY, ph = r() * 7, s = 0.55 + r() * 0.6;
+    wave(xh, y0 - 0.007 * PY, cyc, amp, ph, 0.011 * PY * s, 'rgba(180,180,180,0.42)', 0.005 * PY);
+    wave(xh, y0 + 0.002 * PY, cyc, amp, ph, 0.0038 * PY * s, 'rgba(80,80,80,0.5)', 0.002 * PY);
+    wave(x, y0 - 0.006 * PY, cyc, amp, ph, 0.009 * PY * s, 'rgba(255,252,244,0.15)', 0.005 * PY);
+    wave(x, y0 + 0.002 * PY, cyc, amp, ph, 0.0038 * PY * s, 'rgba(98,88,72,0.17)', 0.003 * PY);
+  }
+  const vwave = (ctx, x0, y0, y1, amp, cyc, ph, lw, style, blur) => {
+    ctx.save(); if (blur) ctx.filter = `blur(${blur}px)`;
+    ctx.strokeStyle = style; ctx.lineWidth = Math.max(0.8, lw); ctx.lineCap = 'round';
+    for (const ox of WX) {
+      if (x0 + ox < -amp - lw * 3 || x0 + ox > W + amp + lw * 3) continue;
+      ctx.beginPath();
+      for (let py = y0; py <= y1; py += 10) ctx.lineTo(x0 + ox + Math.sin(py / H * cyc * 6.283185 + ph) * amp, py);
+      ctx.stroke();
+    }
+    ctx.restore();
+  };
+  for (let i = 0; i < 16; i++) {
+    const x0 = r() * W, y1 = (0.35 + r() * 0.65) * H, y0 = y1 - (0.2 + r() * 0.55) * H;
+    const amp = (0.01 + r() * 0.05) * PX, cyc = 0.4 + r() * 0.8, ph = r() * 7, s = 0.5 + r() * 0.7;
+    vwave(xh, x0 - 0.006 * PX, y0, y1, amp, cyc, ph, 0.012 * PX * s, 'rgba(172,172,172,0.36)', 0.006 * PX);
+    vwave(xh, x0 + 0.003 * PX, y0, y1, amp, cyc, ph, 0.004 * PX * s, 'rgba(86,86,86,0.44)', 0.002 * PX);
+    vwave(x, x0 + 0.003 * PX, y0, y1, amp, cyc, ph, 0.005 * PX * s, 'rgba(98,88,72,0.13)', 0.003 * PX);
+  }
+
+  /* 4) SUN-FADE at the collar. Cloth bleaches from the top down: the shoulders lose
+        pigment first, so the top of the sheet washes pale and slightly warm. */
+  const gF = x.createLinearGradient(0, 0, 0, H * 0.44);
+  gF.addColorStop(0, 'rgba(255,251,238,0.24)'); gF.addColorStop(0.45, 'rgba(255,251,238,0.09)');
+  gF.addColorStop(1, 'rgba(255,251,238,0)');
+  x.fillStyle = gF; x.fillRect(0, 0, W, H * 0.44);
+  for (let i = 0; i < 9; i++) {                    // bleached unevenly, in patches
+    const bx = r() * W, by = r() * H * 0.30, br = (0.06 + r() * 0.16) * PY;
+    for (const ox of WX) {
+      if (bx + ox < -br || bx + ox > W + br) continue;
+      const g = x.createRadialGradient(bx + ox, by, 1, bx + ox, by, br);
+      g.addColorStop(0, `rgba(255,253,244,${0.08 + r() * 0.12})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(bx + ox, by, br, 0, 7); x.fill();
+    }
+  }
+
+  /* 5) ROAD DIRT climbing the lower cloak — a graded wash with a deliberately ragged
+        upper edge (a straight gradient boundary reads as an airbrush), then spatter
+        thrown up off a wet street, thinning fast with height. */
+  const gD = x.createLinearGradient(0, H, 0, H * 0.58);
+  gD.addColorStop(0, 'rgba(68,58,45,0.70)'); gD.addColorStop(0.35, 'rgba(90,78,60,0.34)');
+  gD.addColorStop(0.75, 'rgba(96,86,68,0.10)'); gD.addColorStop(1, 'rgba(96,86,68,0)');
+  x.fillStyle = gD; x.fillRect(0, H * 0.58, W, H * 0.42);
+  for (let i = 0; i < 60; i++) {                   // ragged tide-line of grime
+    const bx = r() * W, by = H - (0.06 + r() * r() * 0.34) * H, br = (0.03 + r() * 0.10) * PY;
+    for (const ox of WX) {
+      if (bx + ox < -br || bx + ox > W + br) continue;
+      const g = x.createRadialGradient(bx + ox, by, 1, bx + ox, by, br);
+      g.addColorStop(0, `rgba(70,60,46,${0.07 + r() * 0.13})`); g.addColorStop(1, 'rgba(0,0,0,0)');
+      x.fillStyle = g; x.beginPath(); x.arc(bx + ox, by, br, 0, 7); x.fill();
+    }
+  }
+  for (let i = 0; i < 1400; i++) {                 // spatter: 0.6–4 mm flecks, low and dense
+    const sy = H - Math.pow(r(), 2.1) * 0.34 * H, sx = r() * W;
+    const sr = (0.0003 + r() * r() * 0.0018) * PY, a = 0.12 + r() * 0.3;
+    x.fillStyle = r() < 0.6 ? `rgba(58,48,36,${a})` : `rgba(96,84,58,${a * 0.8})`;
+    x.beginPath(); x.ellipse(sx, sy, sr * (1 + r()), sr, r() * 3, 0, 7); x.fill();
+    if (r() < 0.3) { xh.fillStyle = `rgba(150,150,150,${a * 0.5})`; xh.beginPath(); xh.arc(sx, sy, sr, 0, 7); xh.fill(); }
+  }
+
+  /* 6) THE HEM — a real garment edge: the cloth is turned up 26 mm and sewn, so there
+        is a step in the height field, two lines of stitching, and below them the band
+        that drags on the ground — abraded pale, with loose fibre pulled out of it. */
+  const hemT = H - 0.026 * PY;
+  xh.save(); xh.filter = `blur(${0.003 * PY}px)`;
+  xh.fillStyle = 'rgba(196,196,196,0.5)'; xh.fillRect(-6, hemT, W + 12, H - hemT + 6); xh.restore();
+  x.save(); x.filter = `blur(${0.004 * PY}px)`;
+  x.fillStyle = 'rgba(255,250,240,0.10)'; x.fillRect(-6, hemT, W + 12, H - hemT + 6); x.restore();
+  for (const sy of [H - 0.021 * PY, H - 0.0055 * PY]) {         // two rows of stitching
+    const dash = 0.0038 * PX, gap = 0.0017 * PX;
+    for (let px = r() * dash; px < W; px += dash + gap) {
+      const wob = (r() - 0.5) * 0.0008 * PY;
+      x.fillStyle = `rgba(84,72,56,${0.30 + r() * 0.22})`;
+      x.fillRect(px, sy + wob, dash, 0.0012 * PY);
+      x.fillStyle = `rgba(255,252,242,${0.12 + r() * 0.12})`;
+      x.fillRect(px, sy + wob - 0.0011 * PY, dash, 0.0008 * PY);
+      xh.fillStyle = `rgba(72,72,72,${0.4 + r() * 0.3})`;
+      xh.fillRect(px, sy + wob, dash, 0.0011 * PY);
+    }
+  }
+  const gW = x.createLinearGradient(0, H, 0, H - 0.05 * PY);    // ground-drag abrasion
+  gW.addColorStop(0, 'rgba(228,222,208,0.32)'); gW.addColorStop(1, 'rgba(228,222,208,0)');
+  x.fillStyle = gW; x.fillRect(0, H - 0.05 * PY, W, 0.05 * PY);
+  for (let i = 0; i < 900; i++) {                               // fibre pulled out of the edge
+    const fx = r() * W, fy = H - Math.pow(r(), 1.7) * 0.055 * PY;
+    const fl = (0.0015 + r() * 0.007) * PY, tilt = (r() - 0.5) * 0.006 * PX;
+    x.strokeStyle = `rgba(250,246,236,${0.10 + r() * 0.2})`; x.lineWidth = Math.max(0.7, 0.0004 * PY);
+    x.beginPath(); x.moveTo(fx, fy); x.lineTo(fx + tilt, fy + fl); x.stroke();
+    xh.strokeStyle = `rgba(170,170,170,${0.12 + r() * 0.2})`; xh.lineWidth = Math.max(0.7, 0.0004 * PY);
+    xh.beginPath(); xh.moveTo(fx, fy); xh.lineTo(fx + tilt, fy + fl); xh.stroke();
+  }
+
+  /* 7) THE PANEL SEAM at the tile edge — a cloak is sewn from panels, and because u
+        tiles ×4 this single seam becomes four running the full height of the garment. */
+  for (const ox of [0, W]) {
+    const sw = 0.005 * PX;
+    xh.save(); xh.filter = `blur(${0.0015 * PX}px)`;
+    xh.fillStyle = 'rgba(190,190,190,0.5)'; xh.fillRect(ox - sw, -4, sw * 2, H + 8); xh.restore();
+    x.save(); x.filter = `blur(${0.002 * PX}px)`;
+    x.fillStyle = 'rgba(255,250,240,0.09)'; x.fillRect(ox - sw, -4, sw * 2, H + 8);
+    x.fillStyle = 'rgba(92,82,66,0.16)'; x.fillRect(ox - 0.0009 * PX, -4, 0.0018 * PX, H + 8); x.restore();
+    for (const sx of [ox - sw * 0.72, ox + sw * 0.72]) {
+      const dash = 0.0038 * PY, gap = 0.0017 * PY;
+      for (let py = r() * dash; py < H; py += dash + gap) {
+        x.fillStyle = `rgba(86,74,58,${0.22 + r() * 0.2})`;
+        x.fillRect(sx, py, 0.0012 * PX, dash);
+        xh.fillStyle = `rgba(80,80,80,${0.3 + r() * 0.3})`;
+        xh.fillRect(sx, py, 0.0011 * PX, dash);
+      }
+    }
+  }
+
+  /* 8) surface fuzz — the raised nap of worn wool. Faint, everywhere, and the reason a
+        cloth normal map does not look like knurled metal. */
+  for (let i = 0; i < 2600; i++) {
+    const fx = r() * W, fy = r() * H, fl = (0.0012 + r() * 0.004) * PY, ang = r() * 7;
+    const dx = Math.cos(ang) * fl, dy = Math.sin(ang) * fl, a = 0.05 + r() * 0.1;
+    x.strokeStyle = r() < 0.5 ? `rgba(255,252,244,${a})` : `rgba(112,102,86,${a * 0.8})`;
+    x.lineWidth = Math.max(0.7, 0.0004 * PY);
+    x.beginPath(); x.moveTo(fx, fy); x.lineTo(fx + dx, fy + dy); x.stroke();
+    xh.strokeStyle = `rgba(158,158,158,${a})`; xh.lineWidth = Math.max(0.7, 0.0004 * PY);
+    xh.beginPath(); xh.moveTo(fx, fy); xh.lineTo(fx + dx, fy + dy); xh.stroke();
+  }
+
+  /* 9) roughness. Low frequency only, so it lives on a small sheet: dirt is dead matte,
+        the turned hem and the seams are compressed and pick up a sheen, and a couple of
+        rub patches (shoulders, where a strap or a wall wears the nap flat) go smoother. */
+  const RW = 256, RH = 512, cR = makeCanvas(RW, RH), xr = cR.getContext('2d');
+  xr.fillStyle = '#dedede'; xr.fillRect(0, 0, RW, RH);
+  const gr = xr.createLinearGradient(0, RH, 0, RH * 0.6);
+  gr.addColorStop(0, 'rgba(255,255,255,0.75)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  xr.fillStyle = gr; xr.fillRect(0, RH * 0.6, RW, RH * 0.4);
+  xr.fillStyle = 'rgba(120,120,120,0.8)'; xr.fillRect(0, RH - 0.026 * (RH / CLOTH_H), RW, 0.026 * (RH / CLOTH_H));
+  for (let i = 0; i < 10; i++) {
+    const bx = r() * RW, by = r() * RH * 0.6, br = 10 + r() * 30;
+    const g = xr.createRadialGradient(bx, by, 1, bx, by, br);
+    g.addColorStop(0, `rgba(150,150,150,${0.3 + r() * 0.3})`); g.addColorStop(1, 'rgba(150,150,150,0)');
+    xr.fillStyle = g; xr.beginPath(); xr.arc(bx, by, br, 0, 7); xr.fill();
+  }
+
+  return { map: canvasTex(c), normal: normalFromHeight(cH, 2.0), rough: canvasTexLinear(cR) };
+}
+const texCloth = makeClothTexture();
+
+/* One cloth material per tint. `color` is a plain multiplier over the light neutral
+   sheet (matBark's trick), `sheenColor` is a washed-out version of the same dye — real
+   sheen is light scattered off the fibre ends of the dyed yarn, so a white sheen on a
+   dark cloak reads as dust rather than as pile. */
+function npcCloth(hex, sheenRough) {
+  return new THREE.MeshPhysicalMaterial({
+    color: hex, vertexColors: true,
+    map: texCloth.map, normalMap: texCloth.normal, normalScale: new THREE.Vector2(1.05, 1.05),
+    roughnessMap: texCloth.rough, roughness: 1, metalness: 0,
+    sheen: 0.65, sheenColor: new THREE.Color(hex).lerp(new THREE.Color(0xffffff), 0.5),
+    sheenRoughness: sheenRough || 0.62
+  });
+}
+// The eight tints are unchanged — they now multiply a light neutral sheet instead of
+// standing in for the albedo, which lands the finished cloak a little DEEPER than the
+// old flat version (the old ones washed out under this exposure).
 const NPC_CLOAKS = [0x7a7261, 0x5d6657, 0x6b5d6e, 0x836f54, 0x596672, 0x74584a, 0x86795f, 0x4f5c50]
-  .map(h => new THREE.MeshStandardMaterial({ color: h, roughness: 1 }));
+  .map(h => npcCloth(h));
 const NPC_SKINS = [0x8a6a52, 0x6b4b38, 0xa3826a, 0x5a4335, 0x96755d]
-  .map(h => new THREE.MeshStandardMaterial({ color: h, roughness: 0.9 }));
+  .map(h => new THREE.MeshStandardMaterial({ color: h, vertexColors: true, roughness: 0.78 }));
 const npcWoodMat = new THREE.MeshStandardMaterial({ color: 0x4a3b2e, roughness: 1 });
 const npcLanternMat = new THREE.MeshStandardMaterial({ color: 0x2a2a22, emissive: srgb(0xffd9a0), emissiveIntensity: 0, roughness: 0.6 });
 // The Archivist (Part 2 campaign giver): a dusty-amber cloak + pale papers, distinct from the
 // eight citizen cloaks so the campaign's one NPC reads on sight.
-const npcArchivistCloak = new THREE.MeshStandardMaterial({ color: 0x8a6a3a, roughness: 1 });
+const npcArchivistCloak = npcCloth(0x8a6a3a, 0.55);
 const npcPaperMat = new THREE.MeshStandardMaterial({ color: 0xcabf9a, roughness: 0.9 });
 // The Tinker (Part 2 Ciphers giver): a coppery apron + a tool-bench of brass gears and a small
 // brazier so she reads at night — distinct on sight from the eight citizens and the Archivist.
-const npcTinkerCloak = new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 1 });
+const npcTinkerCloak = npcCloth(0x7a5a3a, 0.5);
 const npcBrassMat = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.5, metalness: 0.3, envMap: envRT.texture, envMapIntensity: 0.5 });
+
+/* ---------------------------------------------------------- citizen bodies -- */
+/* Indexed (RI+1)×(RJ+1) sheets with smooth normals. fn(u, v, i, j) returns
+   [x, y, z, texU, texV, shade]; `shade` is a grey vertex colour used as baked
+   occlusion (this renderer has no AO pass, and the fold valleys and the inside of a
+   hood are exactly where a cloaked figure needs it). Winding assumes i runs round the
+   axis and j runs UP, which gives outward-facing normals. */
+function _npcSurf(RI, RJ, fn) {
+  const P = [], U = [], C = [], I = [];
+  for (let j = 0; j <= RJ; j++) for (let i = 0; i <= RI; i++) {
+    const v = fn(i / RI, j / RJ, i, j);
+    P.push(v[0], v[1], v[2]); U.push(v[3], v[4]); C.push(v[5], v[5], v[5]);
+  }
+  for (let j = 0; j < RJ; j++) for (let i = 0; i < RI; i++) {
+    const a = j * (RI + 1) + i;
+    I.push(a, a + 1, a + RI + 1, a + 1, a + RI + 2, a + RI + 1);
+  }
+  return { P, U, C, I };
+}
+// close a ring with a triangle fan (flip = the fan faces down)
+function _npcFan(s, RI, first, cx, cy, cz, u, v, shade, flip) {
+  const ci = s.P.length / 3;
+  s.P.push(cx, cy, cz); s.U.push(u, v); s.C.push(shade, shade, shade);
+  for (let i = 0; i < RI; i++) {
+    if (flip) s.I.push(ci, first + i + 1, first + i); else s.I.push(ci, first + i, first + i + 1);
+  }
+}
+/* computeVertexNormals leaves the i=0 / i=RI wrap column split — two coincident vertices
+   whose normals only ever see the triangles on their own side — which draws a hard crease
+   straight down the front of every head, hood and sleeve. Average the pair back together. */
+function _npcGeo(s, RI, RJ) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(s.P, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(s.U, 2));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(s.C, 3));
+  g.setIndex(s.I);
+  g.computeVertexNormals();
+  const n = g.attributes.normal.array;
+  for (let j = 0; j <= RJ; j++) {
+    const a = j * (RI + 1) * 3, b = (j * (RI + 1) + RI) * 3;
+    const nx = n[a] + n[b], ny = n[a + 1] + n[b + 1], nz = n[a + 2] + n[b + 2];
+    const l = Math.hypot(nx, ny, nz) || 1;
+    n[a] = n[b] = nx / l; n[a + 1] = n[b + 1] = ny / l; n[a + 2] = n[b + 2] = nz / l;
+  }
+  return g;
+}
+
+/* THE CLOAK. A lathe with drape: seven fold ridges (plus their second harmonic) that
+   are deepest at the hem, twist a little as they fall and die out at the shoulders; a
+   bell flare at the hem; a shoulder bulge that widens sideways so the top is a body and
+   not the tip of a cone; a shallow crease down the front where the cloak closes; and a
+   closed, slightly dished underside so nothing shows through on a slope. */
+const npcGeoCloak = (() => {
+  const RI = 32, RJ = 16, FOLDS = 7;
+  const s = _npcSurf(RI, RJ, (fu, fv) => {
+    const th = fu * 6.283185, t = fv;
+    let R = 0.163 + 0.228 * Math.pow(1 - t, 1.12);
+    const fl = Math.max(0, 1 - t / 0.22); R += 0.050 * fl * fl;                 // the hem kicks out
+    const sh = Math.max(0, (t - 0.66) / 0.34); R += 0.078 * sh * sh * (1 - sh * 0.42);
+    const fold = Math.cos(FOLDS * th + 0.55 * t) * 0.62 + Math.cos(2 * FOLDS * th + 1.9 + 1.2 * t) * 0.38;
+    R += 0.037 * Math.pow(1 - t, 1.4) * fold;
+    let df = th; if (df > Math.PI) df -= 6.283185;                              // front closure crease
+    R -= 0.014 * Math.exp(-(df * df) / 0.05);
+    const ex = 1 + 0.22 * sh * sh, ez = 1 - 0.06 * sh * sh;
+    // baked occlusion: the fold valleys, the ground the hem stands on, and the general
+    // fall-off of a sky-lit body toward its feet — this renderer has no AO pass at all
+    const ao = (0.74 + 0.26 * Math.min(1, t / 0.24)) * (0.86 + 0.14 * (fold * 0.5 + 0.5)) * (0.80 + 0.20 * t);
+    return [R * Math.sin(th) * ex, t * CLOTH_H - 0.02 * sh * sh, R * Math.cos(th) * ez + 0.018 * sh * sh,
+      fu * 4, t, ao];
+  });
+  _npcFan(s, RI, 0, 0, 0.05, 0, 2, 0.01, 0.34, true);
+  return _npcGeo(s, RI, RJ);
+})();
+
+/* THE HOOD. Not a squashed sphere: a cowl swept as ONE continuous strip that starts at
+   the crown of the LINING, runs down the inside, rolls over the rim and climbs back up
+   the outside. Two consequences, both load-bearing:
+     · the rim has real thickness, and the inside of the cowl is closed dark cloth — with
+       only a rim strip you look straight through the face opening and out the far side
+       of the character, which is a hole, not a shadow;
+     · the winding flips by itself where the strip rolls over, so the lining faces the
+       cavity and the shell faces the world, from one index buffer and one draw call.
+   phiMax then carves the opening: dead ahead the cloth stops at the brow, by 60° round
+   it has come down to cheek height, and at the sides and nape it sweeps onto the
+   shoulders — the rim arches OVER the face instead of closing across it, and the
+   forward bulge puts that brow out past the nose so the face sits in its shadow. */
+const npcGeoHood = (() => {
+  const RI = 28, R0 = 0.232, LIN = 0.88;             // LIN = lining radius, i.e. cloth thickness
+  //          phiFrac rFrac        shade
+  const PR = [[0.00, LIN, 0.045], [0.22, LIN, 0.045], [0.45, LIN + 0.005, 0.05],
+  [0.66, LIN + 0.012, 0.062], [0.84, LIN + 0.022, 0.08], [0.95, LIN + 0.035, 0.105],
+  [1.00, LIN + 0.062, 0.17], [1.035, 0.965, 0.32],
+  [1.00, 1.000, 0.56], [0.90, 1.000, 0.75], [0.76, 1.000, 0.92],
+  [0.60, 1.000, 1.00], [0.44, 1.000, 1.00], [0.28, 1.000, 1.00],
+  [0.13, 1.000, 1.00], [0.00, 1.000, 1.00]];
+  const s = _npcSurf(RI, PR.length - 1, (fu, fv, i, j) => {
+    const th = fu * 6.283185, co = Math.cos(th), si = Math.sin(th);
+    const f = (co + 1) * 0.5;                        // 1 at the face, 0 at the nape
+    // How far down the polar sweep the cloth reaches, per azimuth. THIS is the face
+    // opening: dead ahead the shell stops at the brow (0.68 rad), by 60° round it has
+    // dropped to cheek height and at the sides and nape it sweeps all the way down onto
+    // the shoulders — so the rim arches over the face instead of closing across it.
+    const p = PR[j], phi = p[0] * (1.98 - 1.10 * Math.pow(f, 2.2));
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    // every azimuth-dependent term carries an sp factor so the crown stays a single point
+    let R = R0 * p[1] * (1 + 0.11 * f * sp + 0.13 * f * f * sp + 0.10 * (1 - f) * sp);
+    R *= 1 + 0.02 * Math.cos(5 * th + 0.6) * sp;     // slack folds in the cowl
+    // A uniform backward SHEAR with height, not a rotation: the crown leans back behind
+    // the head (which is what stops a cowl reading as a bowl set on the shoulders) while
+    // the rim — and therefore the overhang that shades the face — stays exactly put.
+    const y = R * cp * 0.98;
+    return [R * sp * si, y, R * sp * co + 0.018 - 0.20 * Math.max(0, y), fu * 2,
+      0.72 + 0.27 * (1 - p[0] * 0.8), p[2] * (0.72 + 0.28 * (0.5 + 0.5 * cp))];
+  });
+  return _npcGeo(s, RI, PR.length - 1);
+})();
+
+/* THE HEAD. Faceless by design — but an ovoid that narrows to a jaw, and vertex-shaded
+   for the hood above it: near black across the crown and the temples, opening up only
+   on the jaw and chin that sit below the cowl's rim. */
+const npcGeoHead = (() => {
+  const RI = 16, RJ = 12;
+  return _npcGeo(_npcSurf(RI, RJ, (fu, fv) => {
+    const th = fu * 6.283185, phi = (1 - fv) * Math.PI;
+    const sp = Math.sin(phi), cp = Math.cos(phi), co = Math.cos(th), si = Math.sin(th);
+    const jaw = 1 - 0.22 * Math.max(0, -cp) * Math.max(0, -cp);
+    // Baked hood shadow. The ramp only opens below cp ≈ -0.28, i.e. the jaw line: the
+    // whole face and crown stay in the cowl's shade and only the underside of the jaw
+    // — the part that sits below the rim — takes light. Nudged front-to-back as well,
+    // so the temples are darker than the chin and the head is not a flat disc.
+    const down = Math.min(1, Math.max(0, (-cp - 0.15) / 0.60));
+    const front = 0.40 + 0.60 * (co * sp * 0.5 + 0.5);
+    return [0.118 * sp * si * jaw, 0.128 * cp, 0.120 * sp * co * jaw + 0.008 * cp,
+      fu, 0.5, (0.20 + 0.62 * down) * (0.80 + 0.20 * front)];
+  }), RI, RJ);
+})();
+
+/* THE SLEEVE. Tapered, cuffed and creased, closed at both ends so the open pipe never
+   shows when the chat/vendor arm swings up. Samples the mid-height band of the sheet. */
+const npcGeoSleeve = (() => {
+  const RI = 12, RJ = 8;
+  const s = _npcSurf(RI, RJ, (fu, fv) => {
+    const th = fu * 6.283185, t = fv;                // 0 = cuff, 1 = shoulder
+    let R = 0.046 + 0.042 * t * t + 0.014 * Math.max(0, 1 - t / 0.14);
+    R *= 1 + 0.055 * Math.cos(4 * th + 1.1) * (1 - t * 0.5);
+    return [R * Math.sin(th), -0.30 + t * 0.46, R * Math.cos(th),
+      fu * 0.7, 0.34 + t * 0.2, 0.80 + 0.20 * t];
+  });
+  _npcFan(s, RI, 0, 0, -0.325, 0, 0.35, 0.34, 0.66, true);
+  _npcFan(s, RI, RJ * (RI + 1), 0, 0.19, 0, 0.35, 0.54, 0.9, false);
+  return _npcGeo(s, RI, RJ);
+})();
+const npcGeoHand = (() => {
+  const RI = 10, RJ = 7;
+  return _npcGeo(_npcSurf(RI, RJ, (fu, fv) => {
+    const th = fu * 6.283185, phi = (1 - fv) * Math.PI;
+    const sp = Math.sin(phi), cp = Math.cos(phi);
+    return [0.036 * sp * Math.sin(th), 0.052 * cp, 0.030 * sp * Math.cos(th), fu, 0.5, 0.55 + 0.4 * (1 - fv)];
+  }), RI, RJ);
+})();
 
 const npcs = [];
 function makeNPCGroup(kid, role) {
   const g = new THREE.Group();
   const cloak = new THREE.Mesh(npcGeoCloak, NPC_CLOAKS[(Math.random() * NPC_CLOAKS.length) | 0]);
   cloak.castShadow = true;
-  const hood = new THREE.Mesh(npcGeoHood, cloak.material); hood.position.y = 1.17; hood.castShadow = true;
-  const head = new THREE.Mesh(npcGeoHead, NPC_SKINS[(Math.random() * NPC_SKINS.length) | 0]); head.position.y = 1.3; head.position.z = 0.05;
+  // hood centre and head centre are tuned together: the cowl's front rim lands at y≈1.18,
+  // in front of and BELOW the eye line, so everything above the jaw sits in its shadow.
+  const hood = new THREE.Mesh(npcGeoHood, cloak.material); hood.position.y = 1.155; hood.castShadow = true;
+  const head = new THREE.Mesh(npcGeoHead, NPC_SKINS[(Math.random() * NPC_SKINS.length) | 0]); head.position.y = 1.212; head.position.z = 0.028;
   g.add(cloak, hood, head);
   let anim = null;
   if (role === 'sweep') {
@@ -150,8 +583,9 @@ function makeNPCGroup(kid, role) {
   } else if (role === 'chat' || role === 'vendor') {
     // a simple pivoting arm so a talker/vendor can raise a hand while gesturing
     const arm = new THREE.Group();
-    const upper = new THREE.Mesh(tplCyl, cloak.material); upper.scale.set(0.055, 0.46, 0.055); upper.position.y = -0.23;
-    arm.add(upper); arm.position.set(0.2, 1.0, 0.06);
+    const upper = new THREE.Mesh(npcGeoSleeve, cloak.material);
+    const hand = new THREE.Mesh(npcGeoHand, head.material); hand.position.y = -0.335;
+    arm.add(upper, hand); arm.position.set(0.2, 1.0, 0.06);
     g.add(arm); anim = arm;
   } else if (Math.random() < 0.5 && role === 'walk') {
     const basket = new THREE.Mesh(tplBox, npcWoodMat); basket.scale.set(0.36, 0.26, 0.28); basket.position.set(0.34, 0.5, 0);
@@ -182,7 +616,7 @@ function spawnNPC(forceRole) {
     if (d < 22 || d > 75) continue;
     const kid = day && role === 'walk' && Math.random() < 0.28;
     const { g, anim } = makeNPCGroup(kid, role);
-    g.position.set(x, 0, z);
+    g.position.set(x, terrainY(x, z), z);
     scene.add(g);
     const npc = {
       g, anim, role, axis, line, off, kid,
@@ -195,7 +629,8 @@ function spawnNPC(forceRole) {
     if (role === 'chat') { // spawn a partner facing them, 0.8 m away
       const { g: g2, anim: a2 } = makeNPCGroup(false, 'chat');
       const a = Math.random() * Math.PI * 2;
-      g2.position.set(x + Math.cos(a) * 0.8, 0, z + Math.sin(a) * 0.8);
+      const p2x = x + Math.cos(a) * 0.8, p2z = z + Math.sin(a) * 0.8;
+      g2.position.set(p2x, terrainY(p2x, p2z), p2z);
       scene.add(g2);
       const p2 = { g: g2, anim: a2, role: 'chat', axis, line, off, kid: false, dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: npc.stateT, greetCd: 0, faceYaw: 0, partner: npc, speaking: false, speakCd: 1e9 };
       npc.partner = p2; npcs.push(p2);
@@ -238,7 +673,8 @@ function spawnChaseKids() {
   for (let k = 0; k < 2; k++) {
     const { g, anim } = makeNPCGroup(true, 'walk');
     const a = ang0 + k * 1.8;
-    g.position.set(cx + Math.cos(a) * R, 0, cz + Math.sin(a) * R); scene.add(g);
+    const kx0 = cx + Math.cos(a) * R, kz0 = cz + Math.sin(a) * R;
+    g.position.set(kx0, terrainY(kx0, kz0), kz0); scene.add(g);
     npcs.push({ g, anim, role: 'chase', axis: 0, line: 0, off: 0, kid: true,
       dir, speed: 2.6, phase: Math.random() * 7, turnCd: 2, stateT: 14 + Math.random() * 16,
       greetCd: 0, faceYaw: 0, partner: null, speaking: false, speakCd: 0,
@@ -256,13 +692,13 @@ function spawnVendorStall() {
     const [vx, vz] = rot(0, -0.75);   // behind the counter
     const [kx, kz] = rot(0, 1.7);     // in front of the counter
     const { g: gv, anim: av } = makeNPCGroup(false, 'vendor');
-    gv.position.set(vx, 0, vz); scene.add(gv);
+    gv.position.set(vx, terrainY(vx, vz), vz); scene.add(gv);
     const vendor = { g: gv, anim: av, role: 'vendor', axis: 0, line: 0, off: 0, kid: false,
       dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: 1e9,
       greetCd: 0, faceYaw: Math.atan2(kx - vx, kz - vz), partner: null, speaking: false, speakCd: 2 + Math.random() * 3 };
     npcs.push(vendor);
     const { g: gc, anim: ac } = makeNPCGroup(false, 'walk');
-    gc.position.set(kx, 0, kz); scene.add(gc);
+    gc.position.set(kx, terrainY(kx, kz), kz); scene.add(gc);
     const cust = { g: gc, anim: ac, role: 'customer', axis: 0, line: 0, off: 0, kid: false,
       dir: 1, speed: 0.25, phase: Math.random() * 7, turnCd: 2, stateT: 8 + Math.random() * 12,
       greetCd: 0, faceYaw: Math.atan2(vx - kx, vz - kz), partner: vendor, speaking: false, speakCd: 0 };
@@ -327,7 +763,7 @@ function updateNPCs(dt, time) {
       }
     } else if (n.role === 'chat') {
       if (n.partner) n.faceYaw = Math.atan2(n.partner.g.position.x - n.g.position.x, n.partner.g.position.z - n.g.position.z);
-      n.g.position.y = Math.abs(Math.sin(time * 1.4 + n.phase)) * 0.02;   // subtle head/torso bob
+      n.bobY = Math.abs(Math.sin(time * 1.4 + n.phase)) * 0.02;   // subtle head/torso bob (added to terrain below)
       // one lead drives the turn-taking; swap speaker every 4–9 s (partner's speakCd is parked high).
       n.speakCd -= dt;
       if (n.speakCd <= 0 && n.partner) { n.speakCd = 4 + Math.random() * 5; n.speaking = !n.speaking; n.partner.speaking = !n.speaking; }
@@ -354,13 +790,13 @@ function updateNPCs(dt, time) {
       const gesturing = n.speakCd < 0;
       if (n.speakCd < -1.3) n.speakCd = 3 + Math.random() * 4;
       if (n.anim) { const tgt = gesturing ? -0.7 + Math.sin(time * 5 + n.phase) * 0.45 : 0; n.anim.rotation.x += (tgt - n.anim.rotation.x) * Math.min(1, 5 * dt); }
-      n.g.position.y = Math.abs(Math.sin(time * 1.1 + n.phase)) * 0.015;
+      n.bobY = Math.abs(Math.sin(time * 1.1 + n.phase)) * 0.015;
       if (!n.partner && n.stateT > 1e8) n.stateT = 6 + Math.random() * 8;   // customer gone (or culled): pack up soon
       n.stateT -= dt;
       if (n.stateT <= 0) { removeNPC(n); continue; }
     } else if (n.role === 'customer') {
       if (n.partner) n.faceYaw = Math.atan2(n.partner.g.position.x - n.g.position.x, n.partner.g.position.z - n.g.position.z);
-      n.g.position.y = Math.abs(Math.sin(time * 1.2 + n.phase)) * 0.02;
+      n.bobY = Math.abs(Math.sin(time * 1.2 + n.phase)) * 0.02;
       n.stateT -= dt;
       if (n.stateT <= 0) {   // done at the stall — wander off; range-cull despawns it, a new one comes later
         n.role = 'walk'; n.speed = 1.1 + Math.random() * 0.6;
@@ -440,9 +876,13 @@ function updateNPCs(dt, time) {
     // walk bob & waddle
     if (moving) {
       n.phase += dt * n.speed * 3.4;
-      n.g.position.y = Math.abs(Math.sin(n.phase)) * 0.05;
+      n.bobY = Math.abs(Math.sin(n.phase)) * 0.05;
       n.g.rotation.z = Math.sin(n.phase) * 0.045;
     } else n.g.rotation.z *= 0.9;
+    // Terrain: the bob is now an OFFSET, applied on top of the ground under the NPC's CURRENT
+    // position (movers only ever update x/z), so walkers ride the relief instead of clipping
+    // through it. Runs after the trunk/solid push-out so it samples the resolved position.
+    n.g.position.y = terrainY(n.g.position.x, n.g.position.z) + (n.bobY || 0);
     // smooth facing
     let dy = n.faceYaw - n.g.rotation.y;
     while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
@@ -625,7 +1065,7 @@ function updateCats(dt, time) {
       yaw = Math.atan2(_perim.tx * a.dir, _perim.tz * a.dir);
       a.t -= dt; if (a.t <= 0) { a.state = 'sit'; a.t = 3 + Math.random() * 5; }
     }
-    p.y = moving ? Math.abs(Math.sin(time * 6 + a.ph)) * 0.03 : 0;    // body bob
+    p.y = terrainY(p.x, p.z) + (moving ? Math.abs(Math.sin(time * 6 + a.ph)) * 0.03 : 0);    // body bob over the ground
     a.tail.rotation.y = Math.sin(time * (a.state === 'sit' ? 2.2 : 3.4) + a.ph) * (a.state === 'sit' ? 0.5 : 0.28);
     smoothYaw(a.g, yaw, dt, 8);
   }
@@ -641,7 +1081,7 @@ function spawnBoar() {
     if (d < 12 || d > 45) continue;
     const g = new THREE.Group();
     const body = new THREE.Mesh(boarGeo, MAT_BOAR); body.castShadow = true;
-    g.add(body); g.position.set(hx, 0, hz); scene.add(g);
+    g.add(body); g.position.set(hx, terrainY(hx, hz), hz); scene.add(g);
     boars.push({ g, hx, hz, ang: Math.random() * 7, ph: Math.random() * 7, turn: 1 + Math.random() * 2 });
     return;
   }
@@ -658,7 +1098,7 @@ function updateBoars(dt, time, on) {
     const toH = Math.atan2(a.hx - p.x, a.hz - p.z), far = Math.hypot(a.hx - p.x, a.hz - p.z);
     if (far > 8) a.ang = toH;
     p.x += Math.sin(a.ang) * 0.5 * dt; p.z += Math.cos(a.ang) * 0.5 * dt;
-    p.y = Math.abs(Math.sin(time * 2 + a.ph)) * 0.03;         // rooting bob
+    p.y = terrainY(p.x, p.z) + Math.abs(Math.sin(time * 2 + a.ph)) * 0.03;   // rooting bob over the ground
     a.g.rotation.x = 0.22 + Math.sin(time * 3 + a.ph) * 0.08;  // head-down
     smoothYaw(a.g, a.ang, dt, 4);
   }
@@ -979,7 +1419,7 @@ function emitScraps(x, z) {
   const n = 2 + (Math.random() * 2 | 0);
   for (let k = 0; k < n; k++) {
     const s = scrapSt[_scrapW++ % SCRAP_N], a = Math.random() * Math.PI * 2, sp = 0.4 + Math.random() * 0.5;
-    s.active = true; s.age = 0; s.life = 0.9 + Math.random() * 0.8; s.x = x; s.y = 0.15; s.z = z; s.vx = Math.cos(a) * sp; s.vz = Math.sin(a) * sp;
+    s.active = true; s.age = 0; s.life = 0.9 + Math.random() * 0.8; s.x = x; s.y = terrainY(x, z) + 0.15; s.z = z; s.vx = Math.cos(a) * sp; s.vz = Math.sin(a) * sp;
   }
 }
 function updateScraps(dt) {
