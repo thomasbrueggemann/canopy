@@ -136,3 +136,14 @@ A single E press SHALL be dispatched down a fixed priority chain, stopping at th
 - **WHEN** the Archivist and the errand giver are both within reach
 - **THEN** E goes to the story interaction and the errand giver is not triggered
 
+### Requirement: Space in the air
+
+Space SHALL jump when grounded and, when airborne and eligible, unfurl or furl the leaf-sail
+(see the leaf-sail capability). The camera SHALL widen its field of view and roll into turns
+while sailing and return smoothly when furled.
+
+#### Scenario: Ground jump unchanged
+
+- **WHEN** the player presses Space while grounded
+- **THEN** they jump exactly as before and no sail opens
+

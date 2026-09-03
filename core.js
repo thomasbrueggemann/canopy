@@ -1902,6 +1902,33 @@ const matSurf = new THREE.MeshStandardMaterial({
   roughnessMap: texSurf.rough, roughness: 1, metalness: 0,
   envMap: envRT.texture, envMapIntensity: 0.22
 });
+/* awesome-pass A3 — grounded facades. Buildings used to float: the same clean plaster at
+   ankle height as at the tenth floor, so the wall met the street on a hard seam with no
+   contact darkening and no dirt. This hook darkens and greens the bottom of every facade in
+   a deliberately wide 0..3.6 m band (world Y, so it follows the terrain rather than the
+   building's own origin): a grime/contact-AO multiply plus an algae tint at the very base.
+   The smoothstep is wide on purpose — a tight one reads as a painted skirting line.
+   Applied to all four facade materials; each gets its own cache key so the four programs
+   neither collide with each other nor with an un-hooked MeshStandardMaterial. */
+function groundFacade(mat, name) {
+  mat.onBeforeCompile = (shader) => {
+    const AV = '#include <begin_vertex>', AF = '#include <map_fragment>';
+    if (shader.vertexShader.indexOf(AV) === -1 || shader.fragmentShader.indexOf(AF) === -1) {
+      console.error('CANOPY facade grounding: anchors not found in the r152 shader — ' + name + ' stays clean');
+      return;
+    }
+    shader.vertexShader = 'varying float vCnpWY;\n' + shader.vertexShader.replace(AV, AV + '\n'
+      + '  vCnpWY = ( modelMatrix * vec4( transformed, 1.0 ) ).y;\n');
+    shader.fragmentShader = 'varying float vCnpWY;\n' + shader.fragmentShader.replace(AF, AF + '\n'
+      + '  {\n'
+      + '    float g = smoothstep( -1.5, 3.6, vCnpWY );\n'
+      + '    diffuseColor.rgb *= mix( 0.62, 1.0, g );\n'
+      + '    diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * vec3( 0.78, 0.92, 0.70 ), ( 1.0 - g ) * 0.55 );\n'
+      + '  }\n');
+  };
+  mat.customProgramCacheKey = () => 'canopy-bld-' + name;
+  return mat;
+}
 const matBld = new THREE.MeshStandardMaterial({
   vertexColors: true, map: texB.map, emissiveMap: texB.emissive,
   emissive: srgb(0xffc27a), emissiveIntensity: 0,
@@ -1912,18 +1939,19 @@ const matBld = new THREE.MeshStandardMaterial({
 /* The other three facade materials. One material (and one Batch, see worldgen-anomalies'
    buildChunk) per building material, chosen per building by district — brick districts and
    concrete districts now differ in what they are MADE OF, not only in their proportions. */
-function makeBldMaterial(tex, envI, nrm) {
-  return new THREE.MeshStandardMaterial({
+function makeBldMaterial(tex, envI, nrm, name) {
+  return groundFacade(new THREE.MeshStandardMaterial({
     vertexColors: true, map: tex.map, emissiveMap: tex.emissive,
     emissive: srgb(0xffc27a), emissiveIntensity: 0,
     roughness: 1, roughnessMap: tex.rough,
     normalMap: tex.normal, normalScale: new THREE.Vector2(nrm, nrm),
     envMap: envRT.texture, envMapIntensity: envI, metalness: 0
-  });
+  }), name);
 }
-const matBldBrick = makeBldMaterial(texBrick, 0.35, 1.15);   // fired clay: matte, deep joints
-const matBldRender = makeBldMaterial(texRender, 0.4, 1.0);   // painted render: matte, soft relief
-const matBldTile = makeBldMaterial(texTile, 0.95, 0.9);      // glazed tile: it is glaze, it reflects
+const matBldBrick = makeBldMaterial(texBrick, 0.35, 1.15, 'brick');   // fired clay: matte, deep joints
+const matBldRender = makeBldMaterial(texRender, 0.4, 1.0, 'render');  // painted render: matte, soft relief
+const matBldTile = makeBldMaterial(texTile, 0.95, 0.9, 'tile');       // glazed tile: it is glaze, it reflects
+groundFacade(matBld, 'concrete');   // matBld is built inline above, so it gets the hook here
 /* Night lighting: worldgen-chunks' updateSky drives the lit-window glow by writing
    matBld.emissiveIntensity once a frame, and that file is not ours to touch. Rather than
    leave three-quarters of the city's windows dead after dark, matBld's emissiveIntensity
@@ -1988,6 +2016,29 @@ const matVine = new THREE.MeshStandardMaterial({
   map: texVine, normalMap: texVine.userData.normal, normalScale: new THREE.Vector2(1, 1),
   vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.86, metalness: 0
 });
+/* awesome-pass A2: vines are leaves too. Without back-scatter a curtain of vine hanging on
+   a sunlit facade reads as a black cut-out — the camera almost always looks at the shaded
+   face of it. Same hook, same anchor and same guard as matLeaf above (see the long comment
+   there for why immediately after <lights_fragment_begin> is the right place); the tint is
+   a shade warmer and the lobes a shade tighter, because vine leaf is thicker and waxier
+   than canopy leaf and transmits less. */
+matVine.onBeforeCompile = (shader) => {
+  const A = '#include <lights_fragment_begin>';
+  if (shader.fragmentShader.indexOf(A) === -1) {
+    console.error('CANOPY vine translucency: anchor "' + A + '" not found in the r152 shader — vines stay opaque');
+    return;
+  }
+  shader.fragmentShader = shader.fragmentShader.replace(A, A + '\n'
+    + '#if ( NUM_DIR_LIGHTS > 0 ) && defined( RE_Direct )\n'
+    + '  {\n'
+    + '    float cnpBack = max( 0.0, - dot( normal, directLight.direction ) );\n'
+    + '    float cnpFwd  = pow( max( 0.0, - dot( geometry.viewDir, directLight.direction ) ), 3.0 );\n'
+    + '    vec3 cnpTint = diffuseColor.rgb * vec3( 1.10, 1.0, 0.62 );\n'
+    + '    reflectedLight.indirectDiffuse += directLight.color * cnpTint * cnpBack * ( 0.24 + 0.70 * cnpFwd );\n'
+    + '  }\n'
+    + '#endif\n');
+};
+matVine.customProgramCacheKey = () => 'canopy-vine-translucency';
 const matGrass = new THREE.MeshStandardMaterial({
   map: texGrass, vertexColors: true, alphaTest: 0.4, side: THREE.DoubleSide, roughness: 0.92, metalness: 0
 });
@@ -2189,6 +2240,14 @@ class Batch {
     if (this.v === 0) return null;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.p, 3));
+    // A degenerate quad (two coincident corners) or a zero-scaled template leaves a zero-length
+    // normal; normalize() in the fragment shader turns that into NaN, which used to die as one
+    // black pixel and now smears into a hard square through the post-fx blur. Point them up.
+    // Pure data repair — no rng, no vertex-count change, so the world layout is untouched.
+    const n = this.n;
+    for (let k = 0; k < n.length; k += 3) {
+      if (n[k] * n[k] + n[k + 1] * n[k + 1] + n[k + 2] * n[k + 2] < 1e-12) { n[k] = 0; n[k + 1] = 1; n[k + 2] = 0; }
+    }
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.n, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(this.u, 2));
     g.setAttribute('color', new THREE.Float32BufferAttribute(this.c, 3));

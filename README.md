@@ -29,11 +29,15 @@ python3 -m http.server 8080   # then open http://localhost:8080
 | W A S D | move |
 | Shift | sprint |
 | Space | jump (or kick off a wall while climbing) |
+| **Space (mid-air)** | unfurl the **leaf-sail** and glide — look down to dive, up to float; Space again to furl |
 | **W while facing vines** | climb — look up to ascend, down to descend |
 | T (hold) | fast-forward time |
 | **E** | talk to a citizen who hails you / take the errand they offer |
 | F | flashlight on/off |
+| I | satchel |
+| **J** | journal — trials, medals, best times, glowseeds, campaign progress |
 | M | sound on/off |
+| P | post-processing on/off |
 | R | return to your last shaded spot |
 | Esc | pause |
 
@@ -47,6 +51,12 @@ python3 -m http.server 8080   # then open http://localhost:8080
   moss, kids run loops, and lantern-carriers wander after dark. They'll nod as you pass.
 - **Climbing** — vine-covered facades and giant trunks are climbable. Mantle onto rooftops,
   or walk the springy roof of the forest itself.
+- **The leaf-sail** — press Space mid-air and a leaf-sail snaps open. Steer with the mouse,
+  dive to gain speed, flare to float; land soft. Rooftop to rooftop, bough to bough, the
+  whole vertical city opens up. Too heavy a load and you drop like a stone.
+- **Glowseeds** — the canopy sheds glowing seeds on its highest rooftops and boughs. Collect
+  them (they hum when you're close, and show as pale dots on the minimap); at 25 and 50 the
+  sail is re-laced and glides further.
 - **Heat** — a day/night cycle drives temperature. Under the leaves you're safe; above the
   canopy (or in open plazas at noon) your body heat climbs. Overheat and you wake up back
   in the shade.
@@ -60,6 +70,13 @@ python3 -m http.server 8080   # then open http://localhost:8080
     body heat fills the bar. The heat gauge *is* the timer.
   - **Lamplighter** — at dusk, wake the dead street-lamps down a row before true night.
   - **Deliveries** — carry a parcel to someone in a neighbouring named district.
+- **Trials** — trial-masters wait at plaza fountains and city shrines (a small ring spins over
+  their head when they have one for you). Seven timed-or-not challenges in an unlock ladder,
+  each with bronze / silver / gold tiers and a persistent best time: Sun Courier, **Canopy
+  Run** (eight ring gates threaded through boughs and rooftops — built for the sail), Track
+  Runner, The Ascent, Night Salvage, Freefall Faith and The Rumor. A 3-2-1-GO countdown, ring
+  gates you fly through, and a medal card at the end. Gold in every trial and you run faster
+  for good.
 - **The Second Seed** — a 7-chapter story campaign that unlocks once you've summited the
   Spire. An old under-dweller, **the Archivist**, keeps the fallen Botanic Authority's
   papers and needs young legs to walk a trail: recover scattered pieces, decode the route,
@@ -67,6 +84,8 @@ python3 -m http.server 8080   # then open http://localhost:8080
   failed. It tours every kind of landmark the world makes, and the finale changes one place
   in the world for good. Press **E** at the Archivist (at the base of the Spire) to begin;
   the campaign runs alongside the errands and Trials without interrupting them.
+- **Where you left off** — position, facing and the hour are saved; reload and you're back
+  under the same leaves (`?fresh=1` starts over).
 - **Day & night** — dawn glow, blazing noon, fireflies, bioluminescent glow-moss, lit
   windows, stars, drifting clouds. After dark the working street lamps throw real pools
   of warm light, and you carry a **flashlight** (F) that lights wherever you look. All
@@ -74,7 +93,12 @@ python3 -m http.server 8080   # then open http://localhost:8080
 
 ## Tech notes
 
-- three.js r152 (UMD build, vendored as `three.min.js`); everything else is `game.js`.
+- three.js r152 (UMD build, vendored as `three.min.js`); the game is a handful of plain
+  scripts (`core.js`, `worldgen-*.js`, `entities.js`, `player.js`, `sail.js`, `main.js`,
+  `post.js`, …) sharing one global scope — no bundler.
+- Post-processing (`post.js`): the scene renders to an HDR target, then bloom, sun shafts, a
+  filmic grade and a vignette composite to the canvas with ACES tone mapping. `P` toggles it,
+  `?post=0` disables it.
 - All textures are generated on canvas at boot; all geometry is procedural and batched
   per chunk (~6 draw calls per chunk) with vertex colors.
 - Headless smoke test / screenshots:

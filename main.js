@@ -318,9 +318,12 @@ function updateMissions(dt, time) {
 /*  Separate from the errand system, and mutually exclusive with it: taking  */
 /*  a trial politely drops any errand. Progress persists in localStorage.    */
 /* ======================================================================== */
-const TRIAL = { COURIER: 'courier', TRACK: 'track', ASCENT: 'ascent', SALVAGE: 'salvage', FREEFALL: 'freefall', RUMOR: 'rumor' };
-const TRIAL_ORDER = [TRIAL.COURIER, TRIAL.TRACK, TRIAL.ASCENT, TRIAL.SALVAGE, TRIAL.FREEFALL, TRIAL.RUMOR];
-const TRIAL_NAME = { courier: 'Sun Courier', track: 'Track Runner', ascent: 'The Ascent', salvage: 'Night Salvage', freefall: 'Freefall Faith', rumor: 'The Rumor' };
+const TRIAL = { COURIER: 'courier', CANOPY: 'canopyrun', TRACK: 'track', ASCENT: 'ascent', SALVAGE: 'salvage', FREEFALL: 'freefall', RUMOR: 'rumor' };
+// awesome-pass C4: Canopy Run sits right after Sun Courier, so it unlocks after the Courier and
+// gates Track Runner behind itself — the existing ordered predecessor rule does the rest.
+const TRIAL_ORDER = [TRIAL.COURIER, TRIAL.CANOPY, TRIAL.TRACK, TRIAL.ASCENT, TRIAL.SALVAGE, TRIAL.FREEFALL, TRIAL.RUMOR];
+const TRIAL_NAME = { courier: 'Sun Courier', canopyrun: 'Canopy Run', track: 'Track Runner', ascent: 'The Ascent', salvage: 'Night Salvage', freefall: 'Freefall Faith', rumor: 'The Rumor' };
+const TIER_COL = ['#c8834a', '#cfd6dc', '#ffd75e'];             // bronze / silver / gold
 const TIERS = ['bronze', 'silver', 'gold'];
 const TIER_MULT = { bronze: 1.35, silver: 1.15, gold: 1.0 };   // timer multipliers — bronze is generous
 const SPRINT_EFF = () => WALK * SPRINT * (sprintBoost ? 1.1 : 1);   // top ground speed, m/s
@@ -329,6 +332,29 @@ let trial = null;                                 // the one active trial, or nu
 let trialProgress = {};                           // { trialId: bestTierIndex }
 try { trialProgress = JSON.parse(localStorage.getItem('canopy.trials') || '{}') || {}; } catch (e) { trialProgress = {}; }
 function saveTrials() { try { localStorage.setItem('canopy.trials', JSON.stringify(trialProgress)); } catch (e) { } }
+/* ---- best times per trial *and tier*: { trialId: { tierIdx: seconds } } (awesome-pass C3) ---- */
+let trialBest = {};
+try { trialBest = JSON.parse(localStorage.getItem('canopy.trialbest') || '{}') || {}; } catch (e) { trialBest = {}; }
+function saveTrialBest() { try { localStorage.setItem('canopy.trialbest', JSON.stringify(trialBest)); } catch (e) { } }
+function bestTime(id, tierIdx) {
+  const b = trialBest[id], v = b ? b[tierIdx] : null;
+  return (typeof v === 'number' && isFinite(v) && v > 0) ? v : null;
+}
+// Records `secs` when it beats the stored best for this trial+tier. Returns true iff improved.
+function recordBest(id, tierIdx, secs) {
+  if (!(typeof secs === 'number' && isFinite(secs) && secs > 0)) return false;
+  const prev = bestTime(id, tierIdx);
+  if (prev !== null && prev <= secs) return false;
+  if (!trialBest[id]) trialBest[id] = {};
+  trialBest[id][tierIdx] = secs; saveTrialBest();
+  return prev !== null;                    // "NEW BEST" only when there was something to beat
+}
+// mm:ss.t — the card/journal precision (fmtTime stays the whole-second HUD clock)
+function fmtPrec(s) {
+  s = Math.max(0, s);
+  const m = Math.floor(s / 60), ss = s - m * 60;
+  return m + ':' + (ss < 10 ? '0' : '') + ss.toFixed(1);
+}
 function tierIndexDone(id) { return (id in trialProgress) ? trialProgress[id] : -1; }
 function nextTierIndex(id) { return Math.min(2, tierIndexDone(id) + 1); }   // bronze→silver→gold, then repeat gold
 function trialsCompletedCount() { let n = 0; for (const id of TRIAL_ORDER) if (id !== TRIAL.RUMOR && tierIndexDone(id) >= 0) n++; return n; }
@@ -340,14 +366,57 @@ function trialUnlocked(i) {
 // Reusable marker pool (toggled, never re-created), mirroring LAMP_POOL.
 const matTrialMark = new THREE.MeshBasicMaterial({ color: 0x8affd0, fog: false });
 const matRelic = new THREE.MeshBasicMaterial({ color: 0xffdf7a, fog: false });
-const TRIAL_POOL = Array.from({ length: 8 }, () => {
-  const m = new THREE.Mesh(tplBlob, matTrialMark); m.scale.setScalar(0.6); m.visible = false; m.renderOrder = 5; scene.add(m); return m;
+/* awesome-pass C1: the pooled markers are now *ring gates* — a torus you run/glide through,
+   with an additive core. `setMark(i,x,y,z,s,mat)` keeps its old signature and semantics:
+   `s` scales the whole group and `mat === matRelic` turns the gate into a gold orb (relics
+   and the Ascent's checkpoint rings stay orbs). Slot 1 renders at 45 % as the "next" gate. */
+const tplGateRing = new THREE.TorusGeometry(1.5, 0.08, 10, 40);
+const matGateRing = new THREE.MeshStandardMaterial({ color: 0x0c2a22, emissive: 0x8affd0, emissiveIntensity: 2.2, roughness: 0.5 });
+const matGateNext = new THREE.MeshStandardMaterial({ color: 0x0c2a22, emissive: 0x8affd0, emissiveIntensity: 1.0, roughness: 0.5 });
+const matGateGold = new THREE.MeshStandardMaterial({ color: 0x2a2410, emissive: 0xffdf7a, emissiveIntensity: 2.2, roughness: 0.5 });
+const GATE_POOL = Array.from({ length: 12 }, () => {
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(tplGateRing, matGateRing); ring.renderOrder = 5;
+  const orb = new THREE.Mesh(tplBlob, matRelic); orb.scale.setScalar(0.55); orb.renderOrder = 5; orb.visible = false;
+  const halo = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: texSoft, color: 0x8affd0, transparent: true, opacity: 0.22,
+    blending: THREE.AdditiveBlending, depthWrite: false, fog: false
+  }));
+  halo.scale.setScalar(2.4); halo.renderOrder = 6;
+  g.add(ring); g.add(orb); g.add(halo);
+  g.visible = false; scene.add(g);
+  return { g, ring, orb, halo, relic: false };
 });
+const TRIAL_POOL = GATE_POOL.map(e => e.g);       // legacy handle: `.visible` toggling still works
 function setMark(i, x, y, z, s, mat) {
-  const m = TRIAL_POOL[i]; if (!m) return;
-  m.position.set(x, y, z); m.scale.setScalar(s || 0.6); m.material = mat || matTrialMark; m.visible = true;
+  const e = GATE_POOL[i]; if (!e) return;
+  e.relic = (mat === matRelic);
+  e.g.position.set(x, y, z); e.g.scale.setScalar(s || 0.6);
+  e.ring.visible = !e.relic; e.orb.visible = e.relic;
+  e.ring.material = e.relic ? matGateGold : (i === 1 ? matGateNext : matGateRing);
+  e.halo.material.color.setHex(e.relic ? 0xffdf7a : 0x8affd0);
+  e.halo.material.opacity = e.relic ? 0.22 : (i === 1 ? 0.10 : 0.22);
+  e.g.visible = true;
 }
 function hideMarks() { for (const m of TRIAL_POOL) m.visible = false; }
+// Gate life: a slow spin up close, a yaw toward the player from afar (so a distant gate reads
+// as a hoop you aim through), and a 2 Hz emissive pulse. Never called in SHOT (updateTrials is
+// the only caller and the loop gates it).
+function updateGates(dt, time) {
+  const pulse = 2.2 + 0.4 * Math.sin(time * Math.PI * 4);        // 1.8 … 2.6 at 2 Hz
+  matGateRing.emissiveIntensity = pulse;
+  matGateNext.emissiveIntensity = pulse * 0.45;
+  matGateGold.emissiveIntensity = pulse;
+  for (const e of GATE_POOL) {
+    if (!e.g.visible) continue;
+    const dx = player.pos.x - e.g.position.x, dz = player.pos.z - e.g.position.z;
+    if (Math.hypot(dx, dz) > 6) {
+      const want = Math.atan2(dx, dz);
+      let dy = want - e.g.rotation.y; while (dy > Math.PI) dy -= 2 * Math.PI; while (dy < -Math.PI) dy += 2 * Math.PI;
+      e.g.rotation.y += dy * Math.min(1, 4 * dt);
+    } else e.g.rotation.y += 0.35 * dt;
+  }
+}
 
 /* ---- trial-master NPCs: deterministic, rare, near plaza fountains & city shrines ---- */
 const trialMasters = new Map();                   // chunkKey → npc
@@ -531,8 +600,63 @@ function bearingPhrase(fromX, fromZ, toX, toZ) {
   return dirs[(Math.round(ang / (Math.PI / 4)) + 8) % 8];
 }
 
+/* ---- awesome-pass C4: the Canopy Run course. Eight ring gates chained greedily through the
+   boughs, weaves, nests, lookouts and vined rooftops of the *resident* chunks (colData only —
+   no worldgen rng is drawn and no chunk is built). Segments stay in a glide-shaped range and
+   the cost prefers gentle turns, small height changes and short hops, with a bias to climb
+   over the first half of the run. Feasible at >= 6 gates. ---- */
+const CANOPY_LAYERS = { bough: 1, weave: 1, nest: 1, lookout: 1 };
+function canopyGateCandidates() {
+  const out = [];
+  for (const c of chunks.values()) {
+    const cd = c.colData; if (!cd) continue;
+    if (cd.pads) for (const q of cd.pads) {
+      if (!q.layer || !CANOPY_LAYERS[q.layer] || q.y < 8) continue;
+      out.push({ x: q.x, y: q.y + 1.6, z: q.z });
+    }
+    if (cd.solids) for (const so of cd.solids) {
+      if (!so.vine || so.h < 8) continue;
+      out.push({ x: (so.x0 + so.x1) / 2, y: (so.y0 || 0) + so.h + 1.6, z: (so.z0 + so.z1) / 2 });
+    }
+  }
+  return out;
+}
+function buildCanopyCourse(fromX, fromZ, fromY) {
+  const cand = canopyGateCandidates(), used = [], gates = [];
+  let cx = fromX, cy = fromY, cz = fromZ, hx = 0, hz = 0, haveH = false;
+  for (let k = 0; k < 8; k++) {
+    let pick = -1, pickCost = Infinity, pickD = 0;
+    for (const band of [[16, 42], [10, 60]]) {                  // widen once if nothing is in reach
+      for (let i = 0; i < cand.length; i++) {
+        if (used[i]) continue;
+        const g = cand[i], dx = g.x - cx, dy = g.y - cy, dz = g.z - cz;
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d < band[0] || d > band[1]) continue;
+        let turn = 0;
+        if (haveH) {
+          let a = Math.atan2(dx, dz) - Math.atan2(hx, hz);
+          while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI;
+          turn = Math.abs(a);
+        }
+        let cost = turn * 8 + Math.abs(dy) * 0.5 + d * 0.2;
+        if (k < 4 && dy < -3) cost += 6;                        // climb first, descend later
+        if (cost < pickCost) { pickCost = cost; pick = i; pickD = d; }
+      }
+      if (pick >= 0) break;
+    }
+    if (pick < 0) break;
+    used[pick] = 1;
+    const g = cand[pick];
+    gates.push({ x: g.x, y: g.y, z: g.z, seg: pickD });
+    hx = g.x - cx; hz = g.z - cz; haveH = true;
+    cx = g.x; cy = g.y; cz = g.z;
+  }
+  return gates;
+}
+
 /* ---- which trials can start right now? ---- */
 function trialFeasible(id) {
+  if (id === TRIAL.CANOPY) return buildCanopyCourse(player.pos.x, player.pos.z, player.pos.y).length >= 6;
   if (id === TRIAL.COURIER) return true;                          // a far rooftop can always be computed
   if (id === TRIAL.TRACK) return !!nearestViaduct(2);
   if (id === TRIAL.ASCENT) return true;                           // colossus, else the Spire
@@ -562,6 +686,7 @@ function offerTrial(tm) {
     if (next === TRIAL.SALVAGE) msg('The trial-master eyes the sky: “Night Salvage waits on the dark, and a sinkhole nearby. Come back after dusk.”', 7);
     else if (next === TRIAL.RUMOR) msg('The trial-master lowers their voice: “There is a rumor I could set you on… but it starts at a broken hightrain span, and there is none within reach of here.”', 8);
     else if (next === TRIAL.TRACK) msg('The trial-master shakes their head: “The Track Runner needs a viaduct within reach. Not here.”', 7);
+    else if (next === TRIAL.CANOPY) msg('The Canopy Run needs boughs and rooftops within reach — not from here.', 7);
     else msg('The trial-master studies you: “No trial for you here, just now. Prove yourself where the way is open.”', 6);
     return;
   }
@@ -571,6 +696,55 @@ function offerTrial(tm) {
 }
 
 function fmtTime(s) { s = Math.max(0, s); const m = Math.floor(s / 60), ss = Math.floor(s % 60); return m + ':' + String(ss).padStart(2, '0'); }
+
+/* ======================================================================== */
+/*  awesome-pass C2/C3 — countdown & completion/failure cards               */
+/* ======================================================================== */
+const countdownEl = document.getElementById('countdown');
+const trialCardEl = document.getElementById('trialCard');
+let trialNow = 0;                      // the loop's `time` at the current updateTrials call
+let cardUntil = 0;                     // perfNow() deadline for the visible card
+
+// Re-trigger the CSS beat animation by clearing and re-setting the class on a reflow.
+function showCount(txt) {
+  if (!countdownEl) return;
+  countdownEl.textContent = txt;
+  countdownEl.style.display = 'block';
+  countdownEl.className = '';
+  void countdownEl.offsetWidth;
+  countdownEl.className = 'beat' + (txt === 'GO' ? ' go' : '');
+}
+function hideCount() { if (countdownEl) { countdownEl.style.display = 'none'; countdownEl.className = ''; } }
+// Freeze the clock and the fail rules for 3.2 s of 3 · 2 · 1 · GO. `after` is the phase the
+// trial really begins in; T.t0 is stamped at GO so the recorded time excludes the countdown.
+function beginCountdown(T, after, objAfter) {
+  T.after = after; T.phase = 'count'; T.count = 3.2; T.countStep = -1;
+  T.objAfter = objAfter || T.obj;                   // restored at GO
+  T.obj = 'Ready…';
+  showCount('3');
+}
+function hideCard() { if (trialCardEl) { trialCardEl.style.display = 'none'; trialCardEl.className = 'panel'; } }
+/* opts: { title, tierIdx, secs (or null), best (or null), newBest, reward, fail } */
+function showTrialCard(opts) {
+  if (!trialCardEl || SHOT) return;
+  const tierIdx = opts.tierIdx | 0;
+  let h = '';
+  if (!opts.fail) h += '<div class="tcMedal" style="color:' + (TIER_COL[tierIdx] || '#8affd0') + '">●</div>';
+  h += '<div class="tcTitle">' + opts.title + '</div>';
+  h += '<div class="tcSub">' + (opts.fail ? 'FAILED' : (TIERS[tierIdx] || '').toUpperCase()) + '</div>';
+  if (opts.secs != null) {
+    h += '<div class="tcRow"><span>TIME</span><b>' + fmtPrec(opts.secs) + '</b></div>';
+    if (!opts.fail) h += '<div class="tcRow"><span>BEST</span><b>' + (opts.best != null ? fmtPrec(opts.best) : 'FIRST CLEAR') + '</b></div>';
+  }
+  if (opts.newBest) h += '<div class="tcNew">NEW BEST</div>';
+  if (opts.reward) h += '<div class="tcReward">' + opts.reward + '</div>';
+  trialCardEl.innerHTML = h;
+  trialCardEl.className = 'panel' + (opts.fail ? ' fail' : '');
+  trialCardEl.style.display = 'block';
+  void trialCardEl.offsetWidth;
+  trialCardEl.classList.add('in');
+  cardUntil = perfNow() + 5500;                                   // perfNow() is ms
+}
 
 function startTrial(id, tierIdx, tm) {
   if (activeMission) failMission('“Leave the errand,” the trial-master says. “This is a greater test.”');
@@ -588,6 +762,13 @@ function startTrial(id, tierIdx, tm) {
     T.timeLeft = dist / SPRINT_EFF() * mult;
     T.phase = 'run'; T.obj = 'Deliver the satchel to the marked rooftop';
     startMsg('Carry the satchel to the far rooftop before the sun-glass runs out — the ground route is too slow; take to the canopy.');
+  } else if (id === TRIAL.CANOPY) {
+    const gates = buildCanopyCourse(p.pos.x, p.pos.z, p.pos.y);
+    T.gates = gates; T.gi = 0;
+    let total = 0; for (const g of gates) total += g.seg;
+    T.timeLeft = total / 7.5 * 1.5 * mult;                       // 7.5 m/s over the whole chain
+    T.phase = 'run'; T.obj = 'Gate 1 / ' + gates.length;
+    startMsg((gates.length === 8 ? 'Eight' : String(gates.length)) + ' gates through the boughs and rooftops. Unfurl the sail between them — jump, then Space.');
   } else if (id === TRIAL.TRACK) {
     const v = nearestViaduct(2);
     const along0 = v.axis === 0 ? p.pos.z : p.pos.x;
@@ -641,19 +822,28 @@ function startTrial(id, tierIdx, tm) {
     startMsg('An old rumor, in three parts. First: “Follow the old hightrain until the rails bend into air.” Seek the broken span.');
   }
   trial = T;
-  activeObjective = T.target || (T.relic) || (T.start) || SPIRE;
+  activeObjective = T.target || (T.relic) || (T.start) || (T.gates && T.gates[0]) || SPIRE;
+  hideCard();
+  // Timed trials count in. Track Runner ('gate') and Freefall ('ascend') keep their untimed
+  // approach phases and count down when the gate / start marker is reached instead.
+  if (T.id !== TRIAL.RUMOR && T.phase !== 'gate' && T.phase !== 'ascend') beginCountdown(T, T.phase);
   updateTrialHUD();
 }
 
 function endTrialCommon() {
-  hideMarks();
+  hideMarks(); hideCount();
+  if (trialTimerEl) trialTimerEl.classList.remove('urgent');
   if (trial && trial.relicMesh) { trial.relicMesh.visible = false; }
   trial = null; activeObjective = SPIRE;
   flashlight.color.setHex(0xfff2d0);
   updateMissionHUD();
 }
+// Elapsed since GO, or null when the trial never left its countdown / is untimed (The Rumor).
+function trialElapsed(T) { return (T && T.t0 != null) ? Math.max(0, trialNow - T.t0) : null; }
 function failTrial(reason, line) {
+  const T = trial;
   if (line) msg(line, 7);
+  if (T && T.id !== TRIAL.RUMOR) showTrialCard({ title: TRIAL_NAME[T.id], tierIdx: T.tierIdx, secs: trialElapsed(T), fail: true, reward: line || '' });
   endTrialCommon();
 }
 function abandonTrial() {
@@ -665,6 +855,14 @@ function completeTrial() {
   const prev = tierIndexDone(T.id);
   if (T.tierIdx > prev) { trialProgress[T.id] = T.tierIdx; saveTrials(); }
   sfxTrialDone();
+  const secs = trialElapsed(T);
+  const before = bestTime(T.id, T.tierIdx);                       // read before recordBest writes
+  const isNew = recordBest(T.id, T.tierIdx, secs);
+  showTrialCard({
+    title: TRIAL_NAME[T.id], tierIdx: T.tierIdx, secs,
+    best: before == null ? null : bestTime(T.id, T.tierIdx),      // null → "FIRST CLEAR"
+    newBest: isNew, reward: 'A ' + T.tier + ' token.'
+  });
   msg('TRIAL COMPLETE — ' + TRIAL_NAME[T.id] + ', ' + T.tier + ' earned. The trial-master presses a token into your hand.', 9, true);
   const allGold = TRIAL_ORDER.every(id => tierIndexDone(id) >= 2);
   if (allGold && !sprintBoost) {
@@ -680,6 +878,8 @@ function completeRumor() {
   const T = trial; if (!T) return;
   if (T.tierIdx > tierIndexDone(T.id)) { trialProgress[T.id] = T.tierIdx; saveTrials(); }
   sfxTrialDone();
+  // The Rumor is untimed: a card, but no clock and no best.
+  showTrialCard({ title: TRIAL_NAME[T.id], tierIdx: T.tierIdx, secs: null, reward: 'The hamlet remembers your face.' });
   discoverHamlet();                                       // permanent minimap marker + '…people live here.'
   if (!hamletErrand) { hamletErrand = true; try { localStorage.setItem('canopy.hamletErrand', '1'); } catch (e) { } }
   setTimeout(() => msg('THE RUMOR — followed to its end. The hamlet was real all along. Its elders welcome you into the leaves; there will always be a place for you here now.', 11, true), 4000);
@@ -694,11 +894,20 @@ function updateTrialHUD() {
   if (mmlabelEl) mmlabelEl.textContent = '✦ ' + TRIAL_NAME[trial.id].toUpperCase();
   trialTimerEl.style.display = 'block';
   const t = trial.timeLeft;
+  const frozen = trial.phase === 'count';
   trialTimerEl.textContent = (t >= 999 ? '· · ·' : fmtTime(t));
   trialTimerEl.style.color = t >= 999 ? '#8affd0' : t < 8 ? '#ff5a4a' : t < 20 ? '#ffc061' : '#8affd0';
+  // awesome-pass C3: the last ten seconds pulse (CSS) as well as tick (sfxNote, in updateTrials)
+  trialTimerEl.classList.toggle('urgent', t < 999 && t < 10 && !frozen);
 }
 
+// Offerable-set cache for the trial-master hover gate (C5): trialFeasible() walks colData, so
+// it is recomputed at most once a second and only when a master is actually in sight.
+let offerCacheT = 0, offerCacheHas = false;
+
 function updateTrials(dt, time) {
+  trialNow = time;
+  if (cardUntil && perfNow() > cardUntil) { cardUntil = 0; hideCard(); }
   syncTrialMasters();
   // face any nearby master toward the player, gently
   for (const tm of trialMasters.values()) {
@@ -711,20 +920,63 @@ function updateTrials(dt, time) {
     if (tm.anim) tm.anim.material.emissiveIntensity = matLamp.emissiveIntensity + 0.4;
   }
   if (!trial) {
+    // C5: a small ring gate hovers over the nearest trial-master while he has something to give.
+    const near = nearestTrialMaster(26);
+    if (near) {
+      if (time > offerCacheT) { offerCacheT = time + 1.0; offerCacheHas = offerableTrials().length > 0; }
+      if (offerCacheHas) setMark(11, near.g.position.x, near.g.position.y + 2.4, near.g.position.z, 0.28);
+      else TRIAL_POOL[11].visible = false;
+    } else { offerCacheHas = false; TRIAL_POOL[11].visible = false; }
+    updateGates(dt, time);
     const tm = nearestTrialMaster(3.4);
     if (tm) hint('Press E — the trial-master offers a trial', 0.4);
     return;
   }
 
   const T = trial, p = player;
+  updateGates(dt, time);
+  // C2: 3 · 2 · 1 · GO. The clock and every fail rule are frozen; movement is not.
+  if (T.phase === 'count') {
+    T.count -= dt;
+    const step = T.count > 2.4 ? 3 : T.count > 1.6 ? 2 : T.count > 0.8 ? 1 : 0;
+    if (step !== T.countStep) {
+      T.countStep = step;
+      showCount(step === 0 ? 'GO' : String(step));
+      if (typeof sfxNote === 'function') { if (step === 0) sfxNote(990, 0.3, 0.1); else sfxNote(660, 0.12, 0.08); }
+    }
+    if (T.count <= 0) { T.phase = T.after; T.obj = T.objAfter || T.obj; T.t0 = time; T.lastTick = 0; hideCount(); }
+    updateTrialHUD();
+    return;
+  }
   // shared fail conditions
-  if (T.timeLeft < 999) { T.timeLeft -= dt; if (T.timeLeft <= 0) { failTrial('time', 'The clock beat you. The trial is lost.'); return; } }
+  if (T.timeLeft < 999) {
+    T.timeLeft -= dt;
+    if (T.timeLeft <= 0) { failTrial('time', 'The clock beat you. The trial is lost.'); return; }
+    if (T.timeLeft < 10) {                                   // C3: a tick on each whole second
+      const w = Math.ceil(T.timeLeft);
+      if (w !== T.lastTick) { T.lastTick = w; if (typeof sfxNote === 'function') sfxNote(880, 0.05, 0.05); }
+    }
+  }
   if (T.id !== TRIAL.RUMOR && p.heat >= 98 && p.exposed) { failTrial('heat', 'The sun took you mid-trial — you fold and stagger for the shade.'); return; }   // The Rumor has no fail but abandon
 
   if (T.id === TRIAL.COURIER) {
     setMark(0, T.target.x, T.target.y + 1.4, T.target.z, 0.8);
     activeObjective = T.target;
     if (dist2(p.pos.x, p.pos.z, T.target.x, T.target.z) < 5 && p.pos.y > T.target.y - 2.2) completeTrial();
+  } else if (T.id === TRIAL.CANOPY) {
+    const g = T.gates[T.gi];
+    if (!g) { completeTrial(); return; }
+    setMark(0, g.x, g.y, g.z, 1.0);
+    const nx = T.gates[T.gi + 1];
+    if (nx) setMark(1, nx.x, nx.y, nx.z, 1.0); else TRIAL_POOL[1].visible = false;
+    activeObjective = g;
+    T.obj = 'Gate ' + (T.gi + 1) + ' / ' + T.gates.length;
+    // Falling is allowed here — the run is about routing, and the leaf-sail is the tool.
+    if (Math.hypot(p.pos.x - g.x, p.pos.y - g.y, p.pos.z - g.z) < 2.8) {
+      T.gi++;
+      if (T.gi >= T.gates.length) { completeTrial(); return; }
+      hint('Gate ' + T.gi + ' / ' + T.gates.length + ' · ' + (trialElapsed(T) || 0).toFixed(1) + ' s', 2.4);
+    }
   } else if (T.id === TRIAL.TRACK) {
     const v = T.v, cross = v.cross;
     const gatePos = v.axis === 0 ? { x: cross, z: T.gateAlong } : { x: T.gateAlong, z: cross };
@@ -732,7 +984,8 @@ function updateTrials(dt, time) {
       setMark(0, gatePos.x, 9.6, gatePos.z, 0.9);
       activeObjective = { x: gatePos.x, z: gatePos.z };
       if (dist2(p.pos.x, p.pos.z, gatePos.x, gatePos.z) < 3 && p.pos.y > 7) {
-        T.phase = 'run'; T.timeLeft = T.cpTime; T.cpIdx = 0;
+        T.timeLeft = T.cpTime; T.cpIdx = 0;
+        beginCountdown(T, 'run');                        // C2: the deck gate is the start line
         msg('Go! Hit each checkpoint before its clock runs out.', 4);
       }
     } else {
@@ -745,7 +998,7 @@ function updateTrials(dt, time) {
         T.cpIdx++;
         if (T.cpIdx >= T.nCp) { completeTrial(); return; }
         T.timeLeft += T.cpTime;                      // refill for the next span
-        hint('Checkpoint ' + T.cpIdx + ' / ' + T.nCp, 2);
+        hint('Gate ' + T.cpIdx + ' / ' + T.nCp + ' · ' + (trialElapsed(T) || 0).toFixed(1) + ' s', 2.4);
       }
     }
     T.obj = T.phase === 'gate' ? 'Reach the start gate on the deck' : ('Checkpoint ' + (T.cpIdx + 1) + ' / ' + T.nCp);
@@ -782,7 +1035,8 @@ function updateTrials(dt, time) {
       setMark(0, T.start.x, T.start.y + 1.2, T.start.z, 0.9);
       activeObjective = T.start;
       if (dist2(p.pos.x, p.pos.z, T.start.x, T.start.z) < 4 && p.pos.y > T.start.y - 2) {
-        T.phase = 'fall'; T.timeLeft = T.fallTime; T.obj = 'Drop to the ground marker — trust the leaves';
+        T.timeLeft = T.fallTime;
+        beginCountdown(T, 'fall', 'Drop to the ground marker — trust the leaves');   // C2: the drop is the timed part
         msg('Now fall. Let the leaves take you down.', 5);
       }
     } else {
@@ -821,6 +1075,60 @@ function updateTrials(dt, time) {
   }
   updateTrialHUD();
 }
+
+/* ======================================================================== */
+/*  THE JOURNAL (J) — awesome-pass C6                                        */
+/*  A read-only ledger: trials with medals and best times, errands, vantages, */
+/*  glowseeds and the campaign chapter. Mutually exclusive with the satchel.  */
+/*  pointer-events:none, so it can never steal the pointer lock.              */
+/* ======================================================================== */
+const journalEl = document.getElementById('journal');
+let journalOpen = false, journalT = 0;
+
+function journalRows() {
+  let h = '<div class="jhead">JOURNAL <span>— J to close</span></div>';
+  h += '<div class="jsec">TRIALS</div>';
+  for (let i = 0; i < TRIAL_ORDER.length; i++) {
+    const id = TRIAL_ORDER[i], bt = tierIndexDone(id), unlocked = trialUnlocked(i);
+    const col = bt >= 0 ? TIER_COL[bt] : '#4a5a43';
+    const glyph = bt >= 0 ? '●'.repeat(bt + 1) : '○';
+    let right;
+    if (!unlocked && bt < 0) right = 'locked';
+    else if (id === TRIAL.RUMOR) right = bt >= 0 ? 'walked' : '—';
+    else { const sec = bt >= 0 ? bestTime(id, bt) : null; right = sec != null ? fmtPrec(sec) : '—'; }
+    h += '<div class="jrow"><span class="jm" style="color:' + col + '">' + glyph + '</span>' +
+         '<span class="jn">' + TRIAL_NAME[id] + '</span><span class="jv">' + right + '</span></div>';
+  }
+  h += '<div class="jsec">THE CITY</div>';
+  h += '<div class="jrow"><span class="jn">Errands</span><span class="jv">' + missionsDone + '</span></div>';
+  h += '<div class="jrow"><span class="jn">Vantages</span><span class="jv">' + doneVantages.size +
+       ((typeof summited !== 'undefined' && summited) ? ' · Spire' : '') + '</span></div>';
+  if (typeof seedsStatus === 'function') {
+    let st = null; try { st = seedsStatus(); } catch (e) { st = null; }
+    if (st) h += '<div class="jrow"><span class="jn">Glowseeds</span><span class="jv">' + (st.found | 0) +
+                 (st.nextAt != null ? ' · next at ' + st.nextAt : '') + '</span></div>';
+  }
+  if (typeof ciphStatus === 'function') { let c = null; try { c = ciphStatus(); } catch (e) { } if (c) h += '<div class="jrow"><span class="jn">Ciphers</span><span class="jv">' + c + '</span></div>'; }
+  if (typeof vergeStatus === 'function') { let v = null; try { v = vergeStatus(); } catch (e) { } if (v) h += '<div class="jrow"><span class="jn">The Verge</span><span class="jv">' + v + '</span></div>'; }
+  h += '<div class="jsec">THE SECOND SEED</div>';
+  const ch = (typeof STORY_SAVE !== 'undefined' && STORY_SAVE) ? (STORY_SAVE.ch | 0) : 0;
+  h += '<div class="jrow"><span class="jn">Chapter</span><span class="jv">' + (ch > 7 ? 'complete' : (ch < 1 ? '—' : ch + ' of 7')) + '</span></div>';
+  return h;
+}
+function refreshJournal() { if (journalEl) journalEl.innerHTML = journalRows(); }
+function journalToggle() {
+  if (!journalEl) return;
+  journalOpen = !journalOpen;
+  if (journalOpen) {
+    const sat = document.getElementById('satchel');          // one panel at a time
+    if (sat && sat.style.display === 'block' && typeof satchelToggle === 'function') satchelToggle();
+    refreshJournal(); journalT = 0;
+  }
+  journalEl.style.display = journalOpen ? 'block' : 'none';
+}
+addEventListener('keydown', e => {
+  if (e.code === 'KeyJ' && started && !SHOT) journalToggle();
+});
 
 /* ======================================================================== */
 /*  MINIMAP                                                                 */
@@ -962,6 +1270,19 @@ function drawMinimap() {
     mmx.fillStyle = '#8affd0';
     for (const tm of trialMasters.values()) {
       mmx.beginPath(); mmx.arc(tm.g.position.x - px, tm.g.position.z - pz, 3, 0, 7); mmx.fill();
+    }
+  }
+  // awesome-pass C7: uncollected glowseeds in map range — faint pale-green ticks (seeds.js
+  // loads after main.js, so this stays typeof-guarded).
+  if (typeof seedsNearby === 'function') {
+    let sds = null; try { sds = seedsNearby(120); } catch (e) { sds = null; }
+    if (sds && sds.length) {
+      mmx.fillStyle = 'rgba(214,255,138,0.7)';
+      for (const sd of sds) {
+        const sx = sd.x - px, sz = sd.z - pz;
+        if (Math.abs(sx) > 190 || Math.abs(sz) > 190) continue;
+        mmx.beginPath(); mmx.arc(sx, sz, 2.4, 0, 7); mmx.fill();
+      }
     }
   }
   // objective marker (the current mission target, or the Spire by default)
@@ -1440,12 +1761,18 @@ function loop() {
     // The Verge Engine expedition (verge.js): the five contraption sites, the Edgewright, the Gate.
     // After the Ciphers so its props/hints sit atop the frame; never in SHOT (fully inert).
     if (!SHOT && typeof updateVerge === 'function') updateVerge(dt, time);
+    // awesome-pass: glowseed collectibles (seeds.js) and session persistence (session.js).
+    if (!SHOT && typeof updateSeeds === 'function') updateSeeds(dt, time);
+    if (!SHOT && typeof updateSession === 'function') updateSession(dt);
 
     // abandon a trial by holding G (hint given in the start message) — never soft-locks
     if (trial) {
       if (keys.KeyG) { gHold += dt; if (gHold > 0.9) { abandonTrial(); gHold = 0; } }
       else gHold = 0;
     } else gHold = 0;
+
+    // awesome-pass C6: the journal is a live ledger — rebuilt once a second while it is open.
+    if (journalOpen) { journalT += dt; if (journalT > 1) { journalT = 0; refreshJournal(); } }
   }
 
   /* --- HUD --- */
@@ -1477,7 +1804,9 @@ function loop() {
 
   stepAudio(time);
 
-  renderer.render(scene, camera);
+  // awesome-pass: post.js owns the final frame (HDR target → bloom/shafts/grade → screen);
+  // plain render when it is absent or disabled.
+  if (typeof postRender === 'function') postRender(); else renderer.render(scene, camera);
 
   frames++; fpsT += dt;
   if (fpsT >= 1) { fpsEl.textContent = frames + ' fps'; frames = 0; fpsT = 0; }

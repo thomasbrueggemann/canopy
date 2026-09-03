@@ -14,7 +14,11 @@ const player = {
   heat: 0, exposed: false, inPit: false, inWater: false,
   bob: 0, stride: 0,
   airPeakY: 0, stagger: 0, shake: 0, blackout: false, blackouts: 0,
-  sunE: 0                                                  // smoothed sun-exposure factor (0=full shade, 1=raw sun)
+  sunE: 0,                                                 // smoothed sun-exposure factor (0=full shade, 1=raw sun)
+  // Leaf-sail (awesome-pass B1): unfurled mid-air with Space, steered with the mouse.
+  // sailT is the 0..1 unfurl ramp the rig scales by; spaceLatch makes Space edge-triggered
+  // (a held jump must never unfurl on the same press); roll/fovT drive the camera feel.
+  sailing: false, sailT: 0, spaceLatch: false, spaceDown: false, roll: 0, fovT: 72
 };
 let lastShade = player.pos.clone();
 /* Terrain: every teleport (R-key recall, blackout, heatstroke, story/verge warps) used to be
@@ -125,6 +129,17 @@ function collectColliders(px, pz, out) {
 }
 const nearby = { solids: [], trunks: [], pads: [], pits: [], waters: [], ladders: [], lifts: [] };
 
+/* ---- Leaf-sail bookkeeping (awesome-pass B1) -------------------------------
+   The glide MATH lives in sail.js (`sailTargets`, a pure function, harness-tested);
+   the state machine and its consequences live here in stepPlayer. These few module
+   locals are the parts of the state that no other file has any business reading. */
+let sailStallT = 0, sailStalling = false, sailHeavyHinted = false, sailLastYaw = player.yaw;
+function sailFurl() {
+  if (!player.sailing) return;
+  player.sailing = false; sailStalling = false; sailStallT = 0;
+  if (typeof sailOnFurl === 'function') sailOnFurl();
+}
+
 /* ---- Lifts (winch lift): the hand-cranked counterweight platform -------------
    Discrete Q/C presses pump a winch velocity (in player.onLift / the keydown
    handler); the velocity decays so a climb is deliberate cranking, not a hold.
@@ -197,6 +212,7 @@ function stepPlayer(dt) {
   // stepHeat (called separately). W/S climb; Space hops off; E lets go (ladderInteract). ---
   if (p.onLadder) {
     const lad = p.onLadder;
+    sailFurl();                                          // a rung ladder always wins over the sail
     p.climbing = false; p.grounded = false; p.onCanopy = false; p.supportLayer = null;
     p.vel.set(0, 0, 0);
     p.pos.x = lad.x + lad.nx * 0.55;                     // stay snapped to the climb line
@@ -256,15 +272,54 @@ function stepPlayer(dt) {
   const _wx = (typeof WX !== 'undefined') ? WX : null;
   if (_wx && _wx.floodSlow < 1 && p.grounded && p.pos.y < 0.6 && !p.inWater && !p.inPit) speed *= _wx.floodSlow;
   if (p.stagger > 0) p.stagger = Math.max(0, p.stagger - dt);
+  /* --- Leaf-sail state (awesome-pass B1) -------------------------------------
+     Space is edge-triggered for the sail and level-triggered for the jump, so the two
+     never fight: the latch only arms once Space has been RELEASED while airborne, which
+     means a held jump can never unfurl on the same press. Landing disarms it. */
+  const spaceNow = !!keys.Space, spaceEdge = spaceNow && !p.spaceDown;
+  p.spaceDown = spaceNow;
+  if (p.grounded) p.spaceLatch = false;
+  else if (!spaceNow) p.spaceLatch = true;
+  if (p.sailing) {
+    // Furl: a second press, or any state that takes the air away from you.
+    if (spaceEdge || p.grounded || p.climbing || p.onLadder || p.onLift || p.inWater || p.blackout) sailFurl();
+  } else if (spaceEdge && p.spaceLatch && !p.grounded && !p.climbing && !p.onLadder && !p.onLift &&
+             !p.inWater && !p.blackout && p.vel.y < -0.5) {
+    if (carrying) { if (!sailHeavyHinted) { sailHeavyHinted = true; hint('Too heavy to sail', 1.5); } }
+    else { p.sailing = true; p.spaceLatch = false; sailStallT = 0; sailStalling = false; if (typeof sailOnUnfurl === 'function') sailOnUnfurl(); }
+  }
+  if (p.grounded) sailHeavyHinted = false;               // one "too heavy" line per airtime
+  p.sailT = clamp(p.sailT + (p.sailing ? dt / 0.25 : -dt / 0.25), 0, 1);
+
   const accel = p.grounded ? 11 : 3;
-  p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
-  p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
+  if (p.sailing) {
+    // No strafe under sail — A/D bank the glide instead (mouse yaw is the steering).
+    const bank = ((keys.KeyD || keys.ArrowRight) ? 1 : 0) - ((keys.KeyA || keys.ArrowLeft) ? 1 : 0);
+    if (bank) { p.vel.x += rx * bank * 0.8 * dt; p.vel.z += rz * bank * 0.8 * dt; }
+  } else {
+    p.vel.x += (mx * speed - p.vel.x) * Math.min(1, accel * dt);
+    p.vel.z += (mz * speed - p.vel.z) * Math.min(1, accel * dt);
+  }
   // Weather gust shove: a m/s nudge added to velocity (hard-capped below WALK in weather.js,
   // so it can never pin the player or blow them off a bough while standing still).
   if (_wx) { p.vel.x += _wx.windX * dt; p.vel.z += _wx.windZ * dt; }
 
-  // gravity
-  if (!p.climbing) p.vel.y -= GRAV * dt;
+  // gravity — or, under sail, the glide that replaces it entirely
+  if (p.sailing) {
+    const st = (typeof sailTargets === 'function')
+      ? sailTargets(p.pitch, (typeof sailTier !== 'undefined' ? sailTier : 0))
+      : { sink: -2.2, speed: 9.5 };
+    let sinkT = st.sink;
+    // Stall: too slow for too long and the sail flutters until you look down again.
+    if (st.speed < 4) sailStallT += dt; else sailStallT = 0;
+    if (sailStallT > 1.2 && !sailStalling) { sailStalling = true; hint('The sail stalls — look down to catch air', 2); }
+    if (sailStalling) { sinkT = -4.5; if (p.pitch < 0.1) { sailStalling = false; sailStallT = 0; } }
+    p.vel.y += (sinkT - p.vel.y) * Math.min(1, 5 * dt);
+    const k = Math.min(1, 3.5 * dt);
+    p.vel.x += (st.speed * fx - p.vel.x) * k;
+    p.vel.z += (st.speed * fz - p.vel.z) * k;
+  } else if (!p.climbing) p.vel.y -= GRAV * dt;
+  const sailVY = p.vel.y;                                 // pre-collision sink rate — the landing rule reads it
 
   if (p.grounded && keys.Space) { p.vel.y = JUMP; p.grounded = false; }
 
@@ -314,6 +369,7 @@ function stepPlayer(dt) {
     const facing = -(fx * climbNormal.x + fz * climbNormal.z); // 1 = looking straight at wall
     if (facing > 0.25) {
       p.climbing = true;
+      sailFurl();                                        // grabbing a vine out of a glide folds the sail
       p.vel.y = p.pitch < -0.4 ? -CLIMB_SPEED : CLIMB_SPEED;
       // mantle over the top edge (absolute: base + relative height)
       const topY = climbSolid.h !== undefined ? (climbSolid.y0 || 0) + climbSolid.h : 0;
@@ -378,6 +434,14 @@ function stepPlayer(dt) {
   }
 
   // --- fall damage: track the apex since leaving the ground, resolve the drop on landing ---
+  // Leaf-sail (B1): a glide's touchdown is measured from a SYNTHETIC apex, not the real one —
+  // you left a rooftop 40 m up but you arrive on a wing. A gentle sink reads as a 5 m step
+  // (free); a dive reads as 9 m (hard but survivable). The sail can never black you out, and
+  // sky nets / water / leaves keep their own rules inside handleLanding.
+  if (p.sailing) {
+    p.airPeakY = p.pos.y + (sailVY > -4.0 ? 5.0 : 9.0);
+    if (p.grounded && !wasGrounded && !wasClimbing) handleLanding(p.airPeakY - p.pos.y);
+  }
   if (p.grounded || p.climbing) {
     p.airPeakY = p.pos.y;                       // on the ground / on a vine → no accumulating fall
   } else {
@@ -395,7 +459,17 @@ function stepPlayer(dt) {
     const strideNow = Math.floor(p.bob / Math.PI);
     if (strideNow !== p.stride) { p.stride = strideNow; sfxStep(); }
   }
-  const bobY = (p.grounded ? Math.sin(p.bob * 2) * 0.042 * Math.min(1, hSpeed / 4) : 0);
+  const bobY = ((p.grounded && !p.sailing) ? Math.sin(p.bob * 2) * 0.042 * Math.min(1, hSpeed / 4) : 0);
+
+  /* --- Leaf-sail camera feel (B1): the fov opens up and the horizon banks into the turn.
+     Both are lerps, so furling settles them back with no snap. updateProjectionMatrix is
+     the expensive half — only call it once the fov has actually moved. */
+  p.fovT += ((p.sailing ? 82 : 72) - p.fovT) * Math.min(1, 4 * dt);
+  if (Math.abs(camera.fov - p.fovT) > 0.05) { camera.fov = p.fovT; camera.updateProjectionMatrix(); }
+  const yawRate = dt > 1e-6 ? (p.yaw - sailLastYaw) / dt : 0;
+  sailLastYaw = p.yaw;
+  const rollT = p.sailing ? clamp(-yawRate * 0.35, -0.16, 0.16) : 0;
+  p.roll += (rollT - p.roll) * Math.min(1, 6 * dt);
 
   ladderProxTick(dt);   // Ladders: throttled "E — climb the ladder" prompt when one is close
   liftProxTick(dt);     // Lifts: throttled "step on · Q up, C down" prompt near / stalled on a lift
@@ -407,7 +481,10 @@ function stepPlayer(dt) {
     camera.position.z += (Math.random() - 0.5) * p.shake * 0.4;
     p.shake = Math.max(0, p.shake - dt * 2.6);
   }
-  camera.rotation.set(p.pitch, p.yaw, 0, 'YXZ');
+  camera.rotation.set(p.pitch, p.yaw, p.roll, 'YXZ');
+
+  // Leaf-sail rig / audio / teaching lines (sail.js, loaded after us; inert in SHOT).
+  if (typeof updateSailRig === 'function') updateSailRig(dt, performance.now() / 1000);
 
   return climbNormal;
 }
@@ -489,6 +566,7 @@ function handleLanding(drop) {
 function blackout(line) {
   const p = player;
   if (p.blackout) return;                                        // already fading — don't stack
+  sailFurl();                                                    // the sail goes with the lights
   p.blackout = true; p.blackouts++;
   fadeEl.style.opacity = 1;
   if (trial) failTrial('fell', 'You fell. The trial is lost.');

@@ -131,6 +131,62 @@
     font-family:Palatino, Georgia, serif; font-style:italic; font-size:11.5px; line-height:1.5;
     color:#cde0b6; white-space:pre-wrap; max-height:56vh; overflow-y:auto;
   }
+  /* ---------- trials: countdown, card, timer pulse (awesome-pass C2/C3) ---------- */
+  #trialTimer.urgent{ animation:tpulse 1s ease-in-out infinite; }
+  @keyframes tpulse{ 0%,100%{ opacity:1; text-shadow:0 0 10px rgba(255,90,74,.55); } 50%{ opacity:.45; text-shadow:none; } }
+
+  #countdown{
+    position:absolute; left:50%; top:38%; transform:translate(-50%,-50%);
+    font-family:Palatino, Georgia, serif; font-size:84px; font-weight:600; letter-spacing:.12em;
+    color:#8affd0; text-shadow:0 0 34px rgba(138,255,208,.5), 0 2px 8px #000;
+    display:none; pointer-events:none;
+  }
+  #countdown.beat{ animation:cdbeat .8s ease-out forwards; }
+  #countdown.go{ color:#dfffe8; letter-spacing:.3em; }
+  @keyframes cdbeat{ 0%{ opacity:0; transform:translate(-50%,-50%) scale(1.7); } 22%{ opacity:1; transform:translate(-50%,-50%) scale(1); } 100%{ opacity:0; transform:translate(-50%,-50%) scale(.86); } }
+
+  #trialCard{
+    position:absolute; left:50%; top:34%; transform:translate(-50%,-50%) translateY(18px);
+    width:360px; padding:18px 22px 16px; text-align:center; display:none;
+    opacity:0; transition:opacity .45s ease-out, transform .45s ease-out;
+  }
+  #trialCard.in{ opacity:1; transform:translate(-50%,-50%); }
+  #trialCard.fail{ border-color:rgba(255,110,90,.42); background:rgba(20,8,6,.6); }
+  #trialCard .tcMedal{ font-size:30px; line-height:1; margin-bottom:4px; text-shadow:0 0 16px currentColor; }
+  #trialCard .tcTitle{ font-family:Palatino, Georgia, serif; font-size:21px; color:#eef6da; letter-spacing:.04em; }
+  #trialCard .tcSub{ font-size:10.5px; letter-spacing:.32em; color:#7e9a6c; margin:3px 0 12px; }
+  #trialCard.fail .tcSub{ color:#e2836f; }
+  #trialCard .tcRow{
+    display:flex; justify-content:space-between; font-size:12px; color:#8fa383;
+    letter-spacing:.16em; padding:3px 4px; border-top:1px solid rgba(150,200,120,.13);
+  }
+  #trialCard .tcRow b{ color:#e6f2d5; font-weight:600; letter-spacing:.06em; font-variant-numeric:tabular-nums; }
+  #trialCard .tcNew{
+    margin-top:9px; display:inline-block; font-size:10px; letter-spacing:.3em; color:#0b1a10;
+    background:#ffd75e; padding:3px 10px; border-radius:11px;
+  }
+  #trialCard .tcReward{
+    margin-top:11px; font-family:Palatino, Georgia, serif; font-style:italic; font-size:12.5px;
+    line-height:1.5; color:#cde0b6;
+  }
+
+  /* ---------- journal (J) ---------- */
+  #journal{
+    position:absolute; right:14px; top:250px; width:266px; padding:12px 14px;
+    font-size:12px; pointer-events:none; display:none;
+  }
+  #journal .jhead{ color:#e8d98a; letter-spacing:.08em; margin-bottom:9px; }
+  #journal .jhead span{ color:#7e9a6c; font-size:10.5px; letter-spacing:.03em; }
+  #journal .jsec{
+    font-size:10px; letter-spacing:.26em; color:#7e9a6c; margin:10px 0 4px;
+    padding-top:7px; border-top:1px solid rgba(150,200,120,.15);
+  }
+  #journal .jsec:first-of-type{ border-top:none; padding-top:0; margin-top:0; }
+  #journal .jrow{ display:flex; align-items:baseline; gap:7px; padding:2px 4px; color:#c9d6bd; }
+  #journal .jm{ font-size:9px; letter-spacing:-1px; min-width:24px; }
+  #journal .jn{ flex:1; }
+  #journal .jv{ color:#8fa383; font-variant-numeric:tabular-nums; font-size:11px; }
+
   #fps{ position:absolute; bottom:10px; right:14px; font-size:10px; color:#5f7053; }
   #status{ position:absolute; left:-9999px; top:0; }
 </style>
@@ -159,6 +215,9 @@
     <div id="missionProg" style="color:#b9c8aa; font-size:11px; margin-top:2px;"></div>
     <div id="trialTimer" style="color:#8affd0; font-size:16px; margin-top:5px; letter-spacing:.14em; font-variant-numeric:tabular-nums; display:none;">--:--</div>
   </div>
+  <div id="countdown"></div>
+  <div id="trialCard" class="panel"></div>
+  <div id="journal" class="panel"></div>
   <div id="satchel" class="panel">
     <div id="satchelHead">SATCHEL <span>— I to close · Tab to leaf through</span></div>
     <div id="satchelList"></div>
@@ -183,10 +242,10 @@
     <div class="objective">✦&nbsp; Follow the marker to the old broadcast Spire — and lend a hand to the citizens who hail you along the way.</div>
     <div class="controls">
       <div><b>Mouse</b> look</div><div><b>W A S D</b> move</div>
-      <div><b>Shift</b> run</div><div><b>Space</b> jump</div>
+      <div><b>Shift</b> run</div><div><b>Space</b> jump · mid-air: leaf-sail</div>
       <div><b>W into vines</b> climb (look up/down)</div><div><b>T</b> hold to pass time</div>
       <div><b>E</b> talk / take an errand</div><div><b>F</b> flashlight</div>
-      <div><b>I</b> satchel</div><div><b>M</b> sound on/off</div>
+      <div><b>I</b> satchel · <b>J</b> journal</div><div><b>M</b> sound on/off</div>
       <div><b>R</b> return to shade</div><div><b>Esc</b> pause</div>
     </div>
     <div class="go" id="goLabel">CLICK TO WAKE</div>
@@ -200,13 +259,17 @@
 <script src="worldgen-builders.js"></script>
 <script src="worldgen-anomalies.js"></script>
 <script src="worldgen-chunks.js"></script>
+<script src="post.js"></script>
 <script src="entities.js"></script>
 <script src="player.js"></script>
+<script src="sail.js"></script>
 <script src="main.js"></script>
 <script src="inventory.js"></script>
 <script src="puzzles.js"></script>
 <script src="verge.js"></script>
 <script src="weather.js"></script>
 <script src="story.js"></script>
+<script src="seeds.js"></script>
+<script src="session.js"></script>
 </body>
 </html>
